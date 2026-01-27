@@ -53,6 +53,9 @@
 
 **注意**：macOS 下实时采集可能受限，建议使用 `.bag` 离线回放模式。
 
+**常见问题**
+- 启动即崩溃（segmentation fault）：优先检查 `rs-enumerate-devices`/`realsense-viewer` 是否正常，可尝试 `rs_run.sh`。若仅在实时模式崩溃，尝试将 `device.color_format` 设为 `rgb8`。
+
 ## 2. GUI 操作流程（推荐顺序）
 1. **连接相机**：确认 D435 连接 USB 3.0，打开 GUI。
 2. **选择模式**：在右侧「模式」选择 `realtime / semi / offline`。

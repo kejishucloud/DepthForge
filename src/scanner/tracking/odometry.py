@@ -24,10 +24,10 @@ class RgbdOdometryTracker:
     def estimate(self, prev: FrameBundle, curr: FrameBundle, init_pose: np.ndarray) -> OdomResult:
         """
         通过 RGB-D 里程计估计相邻帧相对位姿。
-        :param prev: 参数介绍
-        :param curr: 参数介绍
-        :param init_pose: 参数介绍
-        :return: 返回介绍
+        :param prev: 上一帧 RGB-D 数据
+        :param curr: 当前帧 RGB-D 数据
+        :param init_pose: 初始位姿估计（4x4）
+        :return: 里程计估计结果
         """
         prev_rgbd, curr_rgbd, intrinsic = self._build_rgbd(prev, curr)
         option = o3d.pipelines.odometry.OdometryOption()
@@ -74,11 +74,11 @@ class RgbdOdometryTracker:
     ) -> OdomResult:
         """
         使用 ICP 对里程计结果进行精配。
-        :param prev: 参数介绍
-        :param curr: 参数介绍
-        :param init_pose: 参数介绍
-        :param max_correspondence: 参数介绍
-        :return: 返回介绍
+        :param prev: 上一帧 RGB-D 数据
+        :param curr: 当前帧 RGB-D 数据
+        :param init_pose: 初始位姿估计（4x4）
+        :param max_correspondence: ICP 最大对应距离
+        :return: ICP 精配结果
         """
         prev_rgbd, curr_rgbd, intrinsic = self._build_rgbd(prev, curr)
         prev_pcd = o3d.geometry.PointCloud.create_from_rgbd_image(prev_rgbd, intrinsic)
@@ -110,10 +110,10 @@ class RgbdOdometryTracker:
         self, prev: FrameBundle, curr: FrameBundle
     ) -> tuple[o3d.geometry.RGBDImage, o3d.geometry.RGBDImage, o3d.camera.PinholeCameraIntrinsic]:
         """
-        函数介绍。
-        :param prev: 参数介绍
-        :param curr: 参数介绍
-        :return: 返回介绍
+        构建 Open3D 的 RGBD 图像与相机内参对象。
+        :param prev: 上一帧
+        :param curr: 当前帧
+        :return: (上一帧 RGBD, 当前帧 RGBD, 相机内参)
         """
         intrinsic = self._intrinsic_from_intrinsics(curr.intrinsics)
         prev_rgbd = self._rgbd_from_frame(prev)
@@ -122,9 +122,9 @@ class RgbdOdometryTracker:
 
     def _intrinsic_from_intrinsics(self, intr: Intrinsics) -> o3d.camera.PinholeCameraIntrinsic:
         """
-        函数介绍。
-        :param intr: 参数介绍
-        :return: 返回介绍
+        将内参数据转换为 Open3D 的 PinholeCameraIntrinsic。
+        :param intr: 相机内参
+        :return: Open3D 相机内参对象
         """
         return o3d.camera.PinholeCameraIntrinsic(
             int(intr.width),
@@ -137,9 +137,9 @@ class RgbdOdometryTracker:
 
     def _rgbd_from_frame(self, frame: FrameBundle) -> o3d.geometry.RGBDImage:
         """
-        函数介绍。
-        :param frame: 参数介绍
-        :return: 返回介绍
+        将帧数据转换为 Open3D RGBDImage。
+        :param frame: 帧数据
+        :return: Open3D RGBDImage
         """
         color = frame.color_rgb.copy()
         depth = frame.depth_mm.astype(np.uint16)

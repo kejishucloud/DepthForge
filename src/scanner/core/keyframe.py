@@ -29,10 +29,10 @@ class KeyframeSelector:
     def should_add(self, index: int, pose: np.ndarray, quality: float) -> bool:
         """
         判断当前帧是否满足关键帧采样策略。
-        :param index: 参数介绍
-        :param pose: 参数介绍
-        :param quality: 参数介绍
-        :return: 返回介绍
+        :param index: 当前帧序号
+        :param pose: 当前帧的全局位姿（4x4）
+        :param quality: 当前帧质量评分（如里程计 fitness）
+        :return: 是否应采样为关键帧
         """
         policy = self._effective_policy()
         if quality < policy.min_quality:
@@ -51,10 +51,10 @@ class KeyframeSelector:
     def update(self, index: int, pose: np.ndarray, keyframes: Optional[list[Keyframe]] = None) -> None:
         """
         更新关键帧缓存。
-        :param index: 参数介绍
-        :param pose: 参数介绍
-        :param keyframes: 参数介绍
-        :return: 返回介绍
+        :param index: 最新关键帧序号
+        :param pose: 最新关键帧位姿
+        :param keyframes: 可选关键帧列表，用于执行窗口裁剪
+        :return: None
         """
         self._last_key_index = index
         self._last_key_pose = pose
@@ -62,17 +62,17 @@ class KeyframeSelector:
 
     def set_mode(self, mode: str) -> None:
         """
-        函数介绍。
-        :param mode: 参数介绍
-        :return: 返回介绍
+        设置扫描模式，用于应用模式覆盖的关键帧策略。
+        :param mode: 模式名称（realtime/semi/offline）
+        :return: None
         """
         self._mode = mode
 
     def intrinsics_to_dict(self, intr: Intrinsics) -> Dict[str, Any]:
         """
-        函数介绍。
-        :param intr: 参数介绍
-        :return: 返回介绍
+        将相机内参对象转换为可序列化的字典。
+        :param intr: 相机内参
+        :return: 内参字典
         """
         return {
             "width": intr.width,
@@ -86,8 +86,8 @@ class KeyframeSelector:
 
     def _effective_policy(self) -> KeyframePolicy:
         """
-        函数介绍。
-        :return: 返回介绍
+        根据当前模式生成实际生效的关键帧策略。
+        :return: 合并模式覆盖后的策略
         """
         overrides = self._policy.mode_overrides.get(self._mode, {})
         return KeyframePolicy(
@@ -101,9 +101,9 @@ class KeyframeSelector:
 
     def _enforce_window(self, keyframes: Optional[list[Keyframe]]) -> None:
         """
-        函数介绍。
-        :param keyframes: 参数介绍
-        :return: 返回介绍
+        限制关键帧数量，超出时丢弃最早的关键帧。
+        :param keyframes: 关键帧列表
+        :return: None
         """
         if keyframes is None:
             return

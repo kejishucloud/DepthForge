@@ -53,6 +53,9 @@ This guide is for first-time DepthForge users and follows the flow from setup to
 
 **Note**: realtime capture may be limited on macOS; `.bag` playback is recommended.
 
+**Common issues**
+- Crash on start (segmentation fault): verify `rs-enumerate-devices`/`realsense-viewer` first (or run `rs_run.sh`). If it only crashes in realtime mode, try setting `device.color_format` to `rgb8`.
+
 ## 2. GUI Workflow (Recommended)
 1. **Connect camera**: ensure D435 is on USB 3.0, launch the GUI.
 2. **Select mode**: choose `realtime / semi / offline` in the right panel.

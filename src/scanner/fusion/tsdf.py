@@ -16,16 +16,16 @@ class TSDFVolumeManager:
     def reset(self) -> None:
         """
         重置 TSDF 融合体。
-        :return: 返回介绍
+        :return: None
         """
         self._volume = self._create_volume()
 
     def integrate_frame(self, frame: FrameBundle, pose: np.ndarray) -> None:
         """
         融合单帧 RGB-D 到 TSDF 体。
-        :param frame: 参数介绍
-        :param pose: 参数介绍
-        :return: 返回介绍
+        :param frame: 当前帧 RGB-D 数据
+        :param pose: 相机位姿（world_T_cam）
+        :return: None
         """
         rgbd, intrinsic = self._rgbd_from_frame(frame)
         # 约定 pose 为 world_T_cam（相机到世界）
@@ -34,9 +34,9 @@ class TSDFVolumeManager:
     def integrate_keyframes(self, keyframes: Iterable[Keyframe], poses: Iterable[np.ndarray]) -> None:
         """
         使用优化后的位姿批量重融合关键帧。
-        :param keyframes: 参数介绍
-        :param poses: 参数介绍
-        :return: 返回介绍
+        :param keyframes: 关键帧序列
+        :param poses: 对应的优化位姿序列
+        :return: None
         """
         self.reset()
         for keyframe, pose in zip(keyframes, poses):
@@ -46,22 +46,22 @@ class TSDFVolumeManager:
     def extract_mesh(self) -> o3d.geometry.TriangleMesh:
         """
         从 TSDF 体提取三角网格。
-        :return: 返回介绍
+        :return: 三角网格
         """
         return self._volume.extract_triangle_mesh()
 
     def extract_point_cloud(self) -> o3d.geometry.PointCloud:
         """
         从 TSDF 体提取点云。
-        :return: 返回介绍
+        :return: 点云
         """
         return self._volume.extract_point_cloud()
 
     def extract_preview_point_cloud(self, voxel: Optional[float] = None) -> o3d.geometry.PointCloud:
         """
-        函数介绍。
-        :param voxel: 参数介绍
-        :return: 返回介绍
+        提取用于预览的点云，并可选进行体素下采样。
+        :param voxel: 下采样体素大小（None 或 <=0 表示不下采样）
+        :return: 预览点云
         """
         pcd = self._volume.extract_point_cloud()
         if voxel is not None and voxel > 0:
@@ -70,8 +70,8 @@ class TSDFVolumeManager:
 
     def extract_preview_mesh(self) -> o3d.geometry.TriangleMesh:
         """
-        函数介绍。
-        :return: 返回介绍
+        提取用于预览的网格并计算法线。
+        :return: 预览网格
         """
         mesh = self._volume.extract_triangle_mesh()
         mesh.compute_vertex_normals()
@@ -84,16 +84,28 @@ class TSDFVolumeManager:
         return o3d.pipelines.integration.ScalableTSDFVolume(
             voxel_length=voxel_length,
             sdf_trunc=sdf_trunc,
-            color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
-            if color_type == "rgb8"
-            else o3d.pipelines.integration.TSDFVolumeColorType.None,
+            color_type=self._resolve_color_type(color_type),
         )
+
+    @staticmethod
+    def _resolve_color_type(color_type: Optional[str]) -> o3d.pipelines.integration.TSDFVolumeColorType:
+        requested = (color_type or "").strip().lower()
+        tsdf_enum = o3d.pipelines.integration.TSDFVolumeColorType
+        if requested in {"rgb", "rgb8", "color"}:
+            return tsdf_enum.RGB8
+        if requested in {"gray", "gray32"} and hasattr(tsdf_enum, "Gray32"):
+            return tsdf_enum.Gray32
+        # "None" is a reserved keyword in Python; use getattr for compatibility.
+        for name in ("None", "NoColor", "NONE"):
+            if hasattr(tsdf_enum, name):
+                return getattr(tsdf_enum, name)
+        return tsdf_enum.RGB8
 
     def _rgbd_from_frame(self, frame: FrameBundle) -> Tuple[o3d.geometry.RGBDImage, o3d.camera.PinholeCameraIntrinsic]:
         """
-        函数介绍。
-        :param frame: 参数介绍
-        :return: 返回介绍
+        将帧数据转换为 Open3D RGBDImage 与内参。
+        :param frame: RGB-D 帧
+        :return: (RGBDImage, 相机内参)
         """
         color = frame.color_rgb.copy()
         depth = frame.depth_mm.astype(np.uint16)
@@ -120,9 +132,9 @@ class TSDFVolumeManager:
 
     def _rgbd_from_keyframe(self, keyframe: Keyframe) -> Tuple[o3d.geometry.RGBDImage, o3d.camera.PinholeCameraIntrinsic]:
         """
-        函数介绍。
-        :param keyframe: 参数介绍
-        :return: 返回介绍
+        将关键帧转换为 Open3D RGBDImage 与内参。
+        :param keyframe: 关键帧
+        :return: (RGBDImage, 相机内参)
         """
         color = keyframe.color.copy()
         depth = keyframe.depth.astype(np.uint16)

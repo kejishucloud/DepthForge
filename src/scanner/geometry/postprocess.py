@@ -16,13 +16,13 @@ def postprocess_mesh(
 ) -> o3d.geometry.TriangleMesh:
     """
     对网格执行清理、去小碎片与可选平滑/简化。
-    :param mesh: 参数介绍
-    :param simplify_target: 参数介绍
-    :param smooth_iterations: 参数介绍
-    :param remove_small: 参数介绍
-    :param min_triangles: 参数介绍
-    :param keep_largest: 参数介绍
-    :return: 返回介绍
+    :param mesh: 待处理网格
+    :param simplify_target: 目标三角面数（None 表示不简化）
+    :param smooth_iterations: 平滑迭代次数
+    :param remove_small: 是否移除小连通片
+    :param min_triangles: 小片段最小三角面数阈值
+    :param keep_largest: 移除小片段时是否保留最大连通片
+    :return: 处理后的网格
     """
     mesh.remove_duplicated_vertices()
     mesh.remove_degenerate_triangles()

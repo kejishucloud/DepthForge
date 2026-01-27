@@ -26,12 +26,12 @@ def evaluate_quality(
 ) -> TrackingStatus:
     """
     根据 fitness/rmse 阈值评估跟踪质量。
-    :param inlier_ratio: 参数介绍
-    :param rmse: 参数介绍
-    :param delta_translation: 参数介绍
-    :param delta_rotation: 参数介绍
-    :param thresholds: 参数介绍
-    :return: 返回介绍
+    :param inlier_ratio: 匹配内点比例（或 fitness）
+    :param rmse: 配准均方根误差
+    :param delta_translation: 相邻位姿平移幅度
+    :param delta_rotation: 相邻位姿旋转幅度（度）
+    :param thresholds: 质量阈值配置
+    :return: 跟踪状态（OK/WARN/LOST）
     """
     motion_lost = (
         delta_translation >= thresholds.motion_translation_lost

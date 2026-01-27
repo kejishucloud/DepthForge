@@ -13,8 +13,8 @@ class FrameQueue(Generic[T]):
     def put(self, item: T) -> None:
         """
         写入队列，满时丢弃最旧元素。
-        :param item: 参数介绍
-        :return: 返回介绍
+        :param item: 待写入的元素
+        :return: None
         """
         if self._queue.full():
             try:
@@ -26,8 +26,8 @@ class FrameQueue(Generic[T]):
     def get(self, timeout: Optional[float] = None) -> Optional[T]:
         """
         读取队列元素，超时返回 None。
-        :param timeout: 参数介绍
-        :return: 返回介绍
+        :param timeout: 超时秒数，None 表示一直等待
+        :return: 读取到的元素或 None
         """
         try:
             return self._queue.get(timeout=timeout)
@@ -37,7 +37,7 @@ class FrameQueue(Generic[T]):
     def clear(self) -> None:
         """
         清空队列。
-        :return: 返回介绍
+        :return: None
         """
         while not self._queue.empty():
             try:

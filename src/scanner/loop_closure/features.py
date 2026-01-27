@@ -10,9 +10,9 @@ from scanner.core.types import Keyframe
 def rgbd_from_keyframe(keyframe: Keyframe, depth_trunc: float) -> o3d.geometry.RGBDImage:
     """
     将关键帧转换为 Open3D RGBDImage。
-    :param keyframe: 参数介绍
-    :param depth_trunc: 参数介绍
-    :return: 返回介绍
+    :param keyframe: 关键帧（包含彩色、深度与内参）
+    :param depth_trunc: 深度截断距离（米）
+    :return: Open3D RGBDImage
     """
     color = keyframe.color.copy()
     depth = keyframe.depth.astype(np.uint16)
@@ -31,8 +31,8 @@ def rgbd_from_keyframe(keyframe: Keyframe, depth_trunc: float) -> o3d.geometry.R
 def intrinsic_from_keyframe(intr: Dict[str, Any]) -> o3d.camera.PinholeCameraIntrinsic:
     """
     从内参字典构建 Open3D 相机内参。
-    :param intr: 参数介绍
-    :return: 返回介绍
+    :param intr: 内参字典
+    :return: Open3D 相机内参对象
     """
     return o3d.camera.PinholeCameraIntrinsic(
         int(intr["width"]),
@@ -47,9 +47,9 @@ def intrinsic_from_keyframe(intr: Dict[str, Any]) -> o3d.camera.PinholeCameraInt
 def build_point_cloud(keyframe: Keyframe, depth_trunc: float) -> o3d.geometry.PointCloud:
     """
     由关键帧生成点云用于配准。
-    :param keyframe: 参数介绍
-    :param depth_trunc: 参数介绍
-    :return: 返回介绍
+    :param keyframe: 关键帧
+    :param depth_trunc: 深度截断距离（米）
+    :return: 点云
     """
     rgbd = rgbd_from_keyframe(keyframe, depth_trunc)
     intrinsic = intrinsic_from_keyframe(keyframe.intrinsics)
@@ -60,9 +60,9 @@ def build_point_cloud(keyframe: Keyframe, depth_trunc: float) -> o3d.geometry.Po
 def compute_fpfh(pcd: o3d.geometry.PointCloud, voxel_size: float) -> Tuple[o3d.geometry.PointCloud, o3d.pipelines.registration.Feature]:
     """
     计算下采样点云及其 FPFH 特征。
-    :param pcd: 参数介绍
-    :param voxel_size: 参数介绍
-    :return: 返回介绍
+    :param pcd: 原始点云
+    :param voxel_size: 下采样体素大小
+    :return: (下采样点云, FPFH 特征)
     """
     pcd_down = pcd.voxel_down_sample(voxel_size)
     pcd_down.estimate_normals(

@@ -19,9 +19,9 @@ class CandidateConfig:
 def generate_candidates(keyframes: List[Keyframe], config: CandidateConfig) -> List[Tuple[int, int]]:
     """
     根据时间间隔与空间距离生成回环候选对。
-    :param keyframes: 参数介绍
-    :param config: 参数介绍
-    :return: 返回介绍
+    :param keyframes: 关键帧列表（包含位姿）
+    :param config: 候选生成配置
+    :return: 候选对索引列表 (source_index, target_index)
     """
     pairs: List[Tuple[int, int]] = []
     if len(keyframes) < 2:

@@ -16,7 +16,7 @@ class PoseDelta:
 def identity() -> np.ndarray:
     """
     生成 4x4 单位位姿矩阵。
-    :return: 返回介绍
+    :return: 4x4 单位矩阵
     """
     return np.eye(4, dtype=np.float64)
 
@@ -24,9 +24,9 @@ def identity() -> np.ndarray:
 def pose_from_rt(rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
     """
     由旋转和平移构造 4x4 位姿矩阵。
-    :param rotation: 参数介绍
-    :param translation: 参数介绍
-    :return: 返回介绍
+    :param rotation: 3x3 旋转矩阵
+    :param translation: 3 维平移向量
+    :return: 4x4 位姿矩阵
     """
     pose = np.eye(4, dtype=np.float64)
     pose[:3, :3] = rotation
@@ -37,8 +37,8 @@ def pose_from_rt(rotation: np.ndarray, translation: np.ndarray) -> np.ndarray:
 def invert(pose: np.ndarray) -> np.ndarray:
     """
     计算位姿矩阵逆。
-    :param pose: 参数介绍
-    :return: 返回介绍
+    :param pose: 4x4 位姿矩阵
+    :return: 4x4 逆位姿矩阵
     """
     r = pose[:3, :3]
     t = pose[:3, 3]
@@ -51,9 +51,9 @@ def invert(pose: np.ndarray) -> np.ndarray:
 def transform_points(points: np.ndarray, pose: np.ndarray) -> np.ndarray:
     """
     对点云执行位姿变换。
-    :param points: 参数介绍
-    :param pose: 参数介绍
-    :return: 返回介绍
+    :param points: Nx3 点坐标
+    :param pose: 4x4 位姿矩阵
+    :return: 变换后的 Nx3 点坐标
     """
     if points.shape[1] != 3:
         raise ValueError("points must be Nx3")
@@ -66,9 +66,9 @@ def transform_points(points: np.ndarray, pose: np.ndarray) -> np.ndarray:
 def rotation_angle_deg(pose_a: np.ndarray, pose_b: np.ndarray) -> float:
     """
     计算两个位姿的相对旋转角度（度）。
-    :param pose_a: 参数介绍
-    :param pose_b: 参数介绍
-    :return: 返回介绍
+    :param pose_a: 起始位姿
+    :param pose_b: 目标位姿
+    :return: 相对旋转角度（度）
     """
     r = pose_a[:3, :3].T @ pose_b[:3, :3]
     trace_val = np.clip((np.trace(r) - 1.0) / 2.0, -1.0, 1.0)
@@ -79,9 +79,9 @@ def rotation_angle_deg(pose_a: np.ndarray, pose_b: np.ndarray) -> float:
 def pose_delta(pose_a: np.ndarray, pose_b: np.ndarray) -> PoseDelta:
     """
     计算位姿间的平移与旋转差。
-    :param pose_a: 参数介绍
-    :param pose_b: 参数介绍
-    :return: 返回介绍
+    :param pose_a: 起始位姿
+    :param pose_b: 目标位姿
+    :return: 平移与旋转差值
     """
     translation = float(np.linalg.norm(pose_a[:3, 3] - pose_b[:3, 3]))
     rotation = rotation_angle_deg(pose_a, pose_b)
@@ -91,8 +91,8 @@ def pose_delta(pose_a: np.ndarray, pose_b: np.ndarray) -> PoseDelta:
 def is_valid_pose(pose: np.ndarray) -> bool:
     """
     校验位姿矩阵形状与数值有效性。
-    :param pose: 参数介绍
-    :return: 返回介绍
+    :param pose: 待检查位姿矩阵
+    :return: 是否为有效位姿
     """
     if pose.shape != (4, 4):
         return False
@@ -104,9 +104,9 @@ def is_valid_pose(pose: np.ndarray) -> bool:
 def pose_distance(pose_a: np.ndarray, pose_b: np.ndarray) -> Tuple[float, float]:
     """
     返回平移距离与旋转角度。
-    :param pose_a: 参数介绍
-    :param pose_b: 参数介绍
-    :return: 返回介绍
+    :param pose_a: 起始位姿
+    :param pose_b: 目标位姿
+    :return: (平移距离, 旋转角度)
     """
     delta = pose_delta(pose_a, pose_b)
     return delta.translation, delta.rotation_deg

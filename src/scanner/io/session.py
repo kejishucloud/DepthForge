@@ -18,8 +18,8 @@ class SessionManager:
     def create_session(self, config: Dict[str, Any]) -> SessionInfo:
         """
         创建新会话目录与基础元数据。
-        :param config: 参数介绍
-        :return: 返回介绍
+        :param config: 当前扫描配置
+        :return: 新建的会话信息对象
         """
         session_id = time.strftime("%Y%m%d_%H%M%S")
         session_dir = make_session_dir(self._root, session_id)
@@ -30,8 +30,8 @@ class SessionManager:
     def save_session(self, session: SessionInfo) -> Path:
         """
         保存会话 JSON 元数据。
-        :param session: 参数介绍
-        :return: 返回介绍
+        :param session: 会话信息对象
+        :return: 保存后的 session.json 路径
         """
         session_path = session.root / "session.json"
         data = {
@@ -51,8 +51,8 @@ class SessionManager:
     def load_session(self, session_path: Path) -> SessionInfo:
         """
         从 JSON 加载会话元数据。
-        :param session_path: 参数介绍
-        :return: 返回介绍
+        :param session_path: session.json 路径
+        :return: 会话信息对象
         """
         with session_path.open("r", encoding="utf-8") as f:
             data = json.load(f)

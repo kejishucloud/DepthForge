@@ -4,9 +4,12 @@ session_root: "sessions"
 device:
   color_width: 640
   color_height: 480
+  color_format: "auto" # auto => macOS uses rgb8, other platforms use bgr8
   depth_width: 640
   depth_height: 480
   fps: 30
+  frame_timeout_ms: 500
+  connect_timeout_sec: 5
   align_to_color: true
   enable_color: true
   enable_depth: true
@@ -112,3 +115,9 @@ export:
 ui:
   depth_colormap: "jet"
   log_max_lines: 500
+  enable_3d_viewer: true
+  default_view: "rgbd"
+  defer_ui: true
+
+logging:
+  level: "INFO"

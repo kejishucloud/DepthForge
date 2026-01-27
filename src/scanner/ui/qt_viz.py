@@ -23,8 +23,8 @@ class Qt3DViewer(QWidget):
     def show_point_cloud(self, pcd: o3d.geometry.PointCloud) -> None:
         """
         在 Qt 视图中显示点云。
-        :param pcd: 参数介绍
-        :return: 返回介绍
+        :param pcd: Open3D 点云
+        :return: None
         """
         poly = self._pcd_to_polydata(pcd)
         self._plotter.clear()
@@ -35,8 +35,8 @@ class Qt3DViewer(QWidget):
     def show_mesh(self, mesh: o3d.geometry.TriangleMesh) -> None:
         """
         在 Qt 视图中显示网格。
-        :param mesh: 参数介绍
-        :return: 返回介绍
+        :param mesh: Open3D 网格
+        :return: None
         """
         poly = self._mesh_to_polydata(mesh)
         self._plotter.clear()
@@ -46,15 +46,15 @@ class Qt3DViewer(QWidget):
 
     def reset_camera(self) -> None:
         """
-        函数介绍。
-        :return: 返回介绍
+        重置视角到默认相机位置。
+        :return: None
         """
         self._plotter.reset_camera()
 
     def toggle_axes(self) -> None:
         """
-        函数介绍。
-        :return: 返回介绍
+        切换坐标轴显示状态。
+        :return: None
         """
         self._show_axes = not self._show_axes
         if self._show_axes:
@@ -65,8 +65,8 @@ class Qt3DViewer(QWidget):
     def _pcd_to_polydata(self, pcd: o3d.geometry.PointCloud) -> Optional[pv.PolyData]:
         """
         将 Open3D 点云转换为 PyVista 数据。
-        :param pcd: 参数介绍
-        :return: 返回介绍
+        :param pcd: Open3D 点云
+        :return: PyVista PolyData（若为空则返回 None）
         """
         points = np.asarray(pcd.points)
         if points.size == 0:
@@ -80,8 +80,8 @@ class Qt3DViewer(QWidget):
     def _mesh_to_polydata(self, mesh: o3d.geometry.TriangleMesh) -> Optional[pv.PolyData]:
         """
         将 Open3D 网格转换为 PyVista 数据。
-        :param mesh: 参数介绍
-        :return: 返回介绍
+        :param mesh: Open3D 网格
+        :return: PyVista PolyData（若为空则返回 None）
         """
         vertices = np.asarray(mesh.vertices)
         triangles = np.asarray(mesh.triangles)

@@ -1,14 +1,31 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
+import os
+import platform
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-try:
-    import pyrealsense2 as rs
-except Exception:  # pragma: no cover - runtime dependency
-    rs = None
+_RS = None
+_LOGGER = logging.getLogger("scanner")
+
+
+def _require_rs():
+    global _RS
+    if _RS is None:
+        try:
+            import pyrealsense2 as rs  # type: ignore
+        except Exception as exc:  # pragma: no cover - runtime dependency
+            raise RuntimeError("pyrealsense2 未安装或无法加载，请先安装 RealSense SDK。") from exc
+        _RS = rs
+    return _RS
+
+
+def get_rs_module():
+    return _RS
 
 from scanner.core.types import FrameBundle, Intrinsics
 
@@ -31,15 +48,28 @@ class RealSenseDevice:
         self._frame_index = 0
         self._last_frame_time = 0.0
         self._filters: Dict[str, Any] = {}
+        self._color_format = self._normalize_color_format(self._config.get("color_format"))
+
+    @staticmethod
+    def _normalize_color_format(value: Optional[str]) -> str:
+        if value is None:
+            value = "auto"
+        mode = str(value).strip().lower()
+        if mode in ("", "auto", "default"):
+            return "rgb8" if platform.system() == "Darwin" else "bgr8"
+        if mode in ("rgb", "rgb8"):
+            return "rgb8"
+        if mode in ("bgr", "bgr8"):
+            return "bgr8"
+        raise ValueError(f"不支持的 color_format: {value}，仅支持 rgb8 / bgr8 / auto")
 
     @staticmethod
     def list_devices() -> List[DeviceInfo]:
         """
-        函数介绍。
-        :return: 返回介绍
+        枚举当前可用的 RealSense 设备信息。
+        :return: 设备信息列表
         """
-        if rs is None:
-            raise RuntimeError("pyrealsense2 未安装或无法加载，请先安装 RealSense SDK。")
+        rs = _require_rs()
         ctx = rs.context()
         devices = []
         for dev in ctx.query_devices():
@@ -52,36 +82,45 @@ class RealSenseDevice:
             )
         return devices
 
+    @staticmethod
+    def has_device() -> bool:
+        """
+        检查是否存在可用 RealSense 设备。
+        :return: 是否检测到设备
+        """
+        rs = _require_rs()
+        ctx = rs.context()
+        return len(ctx.query_devices()) > 0
+
     def connect(self) -> DeviceInfo:
         """
         连接设备并初始化流、对齐与深度尺度。
-        :return: 返回介绍
+        :return: 设备信息
         """
-        if rs is None:
-            raise RuntimeError("pyrealsense2 未安装或无法加载，请先安装 RealSense SDK。")
+        rs = _require_rs()
 
         self._frame_index = 0
         pipeline = rs.pipeline()
         cfg = rs.config()
 
         if self._config.get("playback_bag"):
-            bag_path = self._config.get("bag_path")
-            if not bag_path:
-                raise ValueError("playback_bag 开启但未提供 bag_path")
-            cfg.enable_device_from_file(bag_path, repeat_playback=False)
+            bag_path = self._resolve_bag_path(self._config.get("bag_path"), mode="playback")
+            cfg.enable_device_from_file(str(bag_path), repeat_playback=False)
+        else:
+            if not self.has_device():
+                raise RuntimeError("未检测到 RealSense 设备，请检查连接/驱动/权限")
 
         if self._config.get("record_bag"):
-            bag_path = self._config.get("bag_path")
-            if not bag_path:
-                raise ValueError("record_bag 开启但未提供 bag_path")
-            cfg.enable_record_to_file(bag_path)
+            bag_path = self._resolve_bag_path(self._config.get("bag_path"), mode="record")
+            cfg.enable_record_to_file(str(bag_path))
 
         if self._config.get("enable_color", True):
+            color_format = rs.format.rgb8 if self._color_format == "rgb8" else rs.format.bgr8
             cfg.enable_stream(
                 rs.stream.color,
                 int(self._config.get("color_width", 640)),
                 int(self._config.get("color_height", 480)),
-                rs.format.bgr8,
+                color_format,
                 int(self._config.get("fps", 30)),
             )
 
@@ -94,7 +133,11 @@ class RealSenseDevice:
                 int(self._config.get("fps", 30)),
             )
 
-        profile = pipeline.start(cfg)
+        try:
+            profile = pipeline.start(cfg)
+        except Exception as exc:
+            _LOGGER.exception("RealSense pipeline start failed")
+            raise RuntimeError(f"RealSense pipeline start 失败: {exc}") from exc
         self._pipeline = pipeline
         self._profile = profile
 
@@ -132,10 +175,13 @@ class RealSenseDevice:
     def disconnect(self) -> None:
         """
         停止管线并释放设备资源。
-        :return: 返回介绍
+        :return: None
         """
         if self._pipeline is not None:
-            self._pipeline.stop()
+            try:
+                self._pipeline.stop()
+            except Exception:
+                pass
         self._pipeline = None
         self._profile = None
         self._align = None
@@ -145,8 +191,8 @@ class RealSenseDevice:
     def read_frame(self, timeout_ms: int = 1000) -> Optional[FrameBundle]:
         """
         读取一帧对齐后的彩色/深度图并裁剪深度范围。
-        :param timeout_ms: 参数介绍
-        :return: 返回介绍
+        :param timeout_ms: 等待超时（毫秒）
+        :return: 帧数据，若超时/无有效帧则返回 None
         """
         if self._pipeline is None:
             return None
@@ -164,7 +210,10 @@ class RealSenseDevice:
 
         color = np.asanyarray(color_frame.get_data())
         depth = np.asanyarray(depth_frame.get_data())
-        color_rgb = color[:, :, ::-1].copy()
+        if self._color_format == "bgr8":
+            color_rgb = color[:, :, ::-1].copy()
+        else:
+            color_rgb = color.copy()
 
         depth_mm = (depth.astype(np.float32) * self._depth_scale * 1000.0).astype(np.uint16)
 
@@ -185,31 +234,32 @@ class RealSenseDevice:
     def get_depth_scale(self) -> float:
         """
         获取深度尺度（米/单位）。
-        :return: 返回介绍
+        :return: 深度尺度
         """
         return self._depth_scale
 
     def get_last_frame_time(self) -> float:
         """
         获取上一帧时间戳。
-        :return: 返回介绍
+        :return: 上一帧时间戳（秒）
         """
         return self._last_frame_time
 
     def get_intrinsics(self) -> Optional[Intrinsics]:
         """
-        函数介绍。
-        :return: 返回介绍
+        获取当前相机内参。
+        :return: 内参对象（若未初始化则为 None）
         """
         return self._intrinsics
 
     def _init_filters(self) -> None:
         """
-        函数介绍。
-        :return: 返回介绍
+        根据配置初始化深度滤波链。
+        :return: None
         """
         filters_cfg = self._config.get("filters", {})
         self._filters = {}
+        rs = _require_rs()
         if filters_cfg.get("enable_decimation", False):
             decimation = rs.decimation_filter()
             decimation.set_option(rs.option.filter_magnitude, float(filters_cfg.get("decimation_magnitude", 2)))
@@ -235,11 +285,32 @@ class RealSenseDevice:
             )
             self._filters["threshold"] = thresh
 
+    def _resolve_bag_path(self, bag_path: Optional[str], mode: str) -> Path:
+        if not bag_path:
+            raise ValueError(f"{mode} 模式需要提供 bag_path")
+        path = Path(bag_path).expanduser()
+        if path.suffix.lower() != ".bag":
+            raise ValueError("bag_path 必须以 .bag 结尾")
+        if mode == "record":
+            path = path.resolve()
+            parent = path.parent
+            parent.mkdir(parents=True, exist_ok=True)
+            if not parent.exists() or not parent.is_dir():
+                raise ValueError(f"bag 路径目录不存在: {parent}")
+            if not os.access(parent, os.W_OK):
+                raise ValueError(f"bag 路径不可写: {parent}")
+        else:
+            path = path.resolve()
+            if not path.exists():
+                raise ValueError(f"bag 文件不存在: {path}")
+        self._config["bag_path"] = str(path)
+        return path
+
     def _apply_filters(self, depth_frame: "rs.depth_frame") -> "rs.depth_frame":
         """
-        函数介绍。
-        :param depth_frame: 参数介绍
-        :return: 返回介绍
+        依次应用配置的深度滤波器。
+        :param depth_frame: 原始深度帧
+        :return: 处理后的深度帧
         """
         frame = depth_frame
         for key in ("decimation", "spatial", "temporal", "hole", "threshold"):

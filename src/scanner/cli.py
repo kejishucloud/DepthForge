@@ -25,10 +25,10 @@ from scanner.utils.path import ensure_dir
 def run_pipeline(config: Dict[str, Any], output_root: Path, optimize: bool) -> None:
     """
     在 CLI 下执行采集/重建/导出全流程。
-    :param config: 参数介绍
-    :param output_root: 参数介绍
-    :param optimize: 参数介绍
-    :return: 返回介绍
+    :param config: 扫描与重建配置
+    :param output_root: 会话输出根目录
+    :param optimize: 是否启用回环优化
+    :return: None
     """
     session_manager = SessionManager(output_root)
     session = session_manager.create_session(config)
