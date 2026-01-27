@@ -1,2 +1,153 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Packaging / build
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+wheelhouse/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.pytype/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+log/
+
+# =========================
+# IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# OS
+# =========================
+.DS_Store
+.DS_Store?
+.AppleDouble
+.LSOverride
+Icon?
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# =========================
+# PySide6 / PyQt / Qt
+# =========================
+*.qmlc
+*.jsc
+*.prl
+*.qrc
+*.pyi
+*.ui~      # Qt Designer backup
+
+# =========================
+# 3D Scanning / Reconstruction Outputs (IMPORTANT)
+# =========================
+# Large raw recordings
+*.bag
+*.rosbag
+*.mkv
+
+# Datasets / captures
+data/
+dataset/
+datasets/
+captures/
+recordings/
+
+# Runtime outputs
+outputs/
+output/
+runs/
+run/
+results/
+tmp/
+temp/
+
+# Point clouds / meshes / 3D assets (often huge)
+*.ply
+*.pcd
+*.xyz
+*.xyzn
+*.pts
+*.las
+*.laz
+*.e57
+*.obj
+*.stl
+*.fbx
+*.gltf
+*.glb
+*.dae
+*.3mf
+
+# Common image/video dumps
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tiff
+*.tif
+*.webp
+*.mp4
+*.avi
+*.mov
+
+# BUT keep small demo assets if you put them under assets/
+!assets/
+!assets/**
+
+# =========================
+# Config secrets (keep examples)
+# =========================
+.env
+.env.*
+!.env.example
+
+# Keep example configs if needed
+!configs/
+!configs/**
+
+# =========================
+# Optional: Caches from Open3D/VTK (if you generate)
+# =========================
+cache/
+.cmake/
+CMakeFiles/
+CMakeCache.txt
+
+# =========================
+# GitHub / CI local
+# =========================
+*.local
