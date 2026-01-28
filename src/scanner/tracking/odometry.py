@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from typing import Any, Dict, Iterable
 
 import numpy as np
 import open3d as o3d
 
 from scanner.core.types import FrameBundle, Intrinsics
+
+_LOGGER = logging.getLogger("scanner")
 
 
 @dataclass
@@ -20,6 +24,33 @@ class OdomResult:
 class RgbdOdometryTracker:
     def __init__(self, config: Dict[str, Any]) -> None:
         self._config = config
+        self._unsupported_options: set[str] = set()
+
+    def _set_option(
+        self,
+        option: object,
+        name: str,
+        value: object,
+        *,
+        aliases: Iterable[str] = (),
+    ) -> None:
+        """
+        尝试设置 Open3D OdometryOption 参数，兼容不同版本的属性名。
+        :param option: Open3D OdometryOption
+        :param name: 首选属性名
+        :param value: 设置值
+        :param aliases: 可选属性名别名
+        """
+        for attr in (name, *aliases):
+            if hasattr(option, attr):
+                try:
+                    setattr(option, attr, value)
+                except (AttributeError, TypeError):
+                    break
+                return
+        if name not in self._unsupported_options:
+            _LOGGER.debug("OdometryOption does not support '%s'; config ignored.", name)
+            self._unsupported_options.add(name)
 
     def estimate(self, prev: FrameBundle, curr: FrameBundle, init_pose: np.ndarray) -> OdomResult:
         """
@@ -31,11 +62,20 @@ class RgbdOdometryTracker:
         """
         prev_rgbd, curr_rgbd, intrinsic = self._build_rgbd(prev, curr)
         option = o3d.pipelines.odometry.OdometryOption()
-        option.max_depth_diff = float(self._config.get("max_depth_diff", 0.07))
-        option.min_depth = float(self._config.get("min_depth", 0.2))
-        option.max_depth = float(self._config.get("max_depth", 1.0))
+        self._set_option(
+            option,
+            "max_depth_diff",
+            float(self._config.get("max_depth_diff", 0.07)),
+            aliases=("max_depth_difference",),
+        )
+        self._set_option(option, "min_depth", float(self._config.get("min_depth", 0.2)))
+        self._set_option(option, "max_depth", float(self._config.get("max_depth", 1.0)))
         levels = int(self._config.get("pyramid_levels", 3))
-        option.iteration_number_per_pyramid_level = [20, 10, 5][:levels]
+        self._set_option(
+            option,
+            "iteration_number_per_pyramid_level",
+            [20, 10, 5][:levels],
+        )
 
         jacobian = o3d.pipelines.odometry.RGBDOdometryJacobianFromHybridTerm()
         success, trans, _ = o3d.pipelines.odometry.compute_rgbd_odometry(

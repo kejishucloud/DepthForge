@@ -1,10 +1,9 @@
 version: 0.1
-session_root: "sessions"
-
+session_root: sessions
 device:
   color_width: 640
   color_height: 480
-  color_format: "auto" # auto => macOS uses rgb8, other platforms use bgr8
+  color_format: auto
   depth_width: 640
   depth_height: 480
   fps: 30
@@ -14,7 +13,7 @@ device:
   enable_color: true
   enable_depth: true
   record_bag: false
-  bag_path: ""
+  bag_path: ''
   playback_bag: false
   playback_real_time: true
   depth_unit_scale: 0.001
@@ -33,15 +32,13 @@ device:
     enable_hole_filling: true
     hole_filling_mode: 1
     enable_threshold: true
-
 scan:
-  mode: "realtime"  # realtime | semi | offline
+  mode: realtime
   preview_stride: 5
   fusion_stride: 2
   max_queue: 30
   stop_on_lost: true
   lost_max_frames: 5
-
 tracking:
   odom:
     max_depth_diff: 0.07
@@ -63,7 +60,6 @@ tracking:
     motion_translation_lost: 0.3
     motion_rotation_warn: 20.0
     motion_rotation_lost: 45.0
-
 keyframe:
   min_translation: 0.03
   min_rotation_deg: 5.0
@@ -77,7 +73,6 @@ keyframe:
       min_interval: 6
     offline:
       min_interval: 1
-
 loop_closure:
   enable: true
   temporal_gap: 30
@@ -92,32 +87,30 @@ loop_closure:
     confidence: 0.999
   icp:
     max_correspondence: 0.04
-
 fusion:
   voxel_length: 0.004
   sdf_trunc: 0.02
-  depth_trunc: 1.0
-  color_type: "rgb8"
+  depth_trunc: 0.3
+  color_type: rgb8
   preview_voxel: 0.01
   preview_mesh: false
-
 mesh:
   simplify_target_triangles: 200000
   smooth_iterations: 5
   remove_small_components: true
   min_triangles: 500
   keep_largest: true
-
 export:
-  default_mesh_format: "ply"  # ply | obj | stl
-  default_cloud_format: "ply" # ply | pcd
-
+  default_mesh_format: ply
+  default_cloud_format: ply
 ui:
-  depth_colormap: "jet"
+  depth_colormap: jet
   log_max_lines: 500
   enable_3d_viewer: true
-  default_view: "rgbd"
+  default_view: rgbd
   defer_ui: true
-
+  language: zh-CN
+  theme: dark
+  performance: high
 logging:
-  level: "INFO"
+  level: INFO

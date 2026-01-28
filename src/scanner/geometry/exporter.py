@@ -6,7 +6,7 @@ from typing import Literal
 import open3d as o3d
 
 
-MeshFormat = Literal["ply", "obj", "stl"]
+MeshFormat = Literal["ply", "obj", "stl", "glb"]
 CloudFormat = Literal["ply", "pcd"]
 
 
@@ -15,7 +15,7 @@ def export_mesh(mesh: o3d.geometry.TriangleMesh, path: Path, fmt: MeshFormat) ->
     导出三角网格到指定格式。
     :param mesh: 需要导出的网格
     :param path: 不含后缀的目标路径
-    :param fmt: 导出格式（ply/obj/stl）
+    :param fmt: 导出格式（ply/obj/stl/glb）
     :return: 实际导出文件路径
     """
     file_path = path.with_suffix(f".{fmt}")

@@ -197,7 +197,14 @@ class RealSenseDevice:
         if self._pipeline is None:
             return None
 
-        frames = self._pipeline.wait_for_frames(timeout_ms)
+        try:
+            frames = self._pipeline.wait_for_frames(timeout_ms)
+        except Exception as exc:
+            message = str(exc).lower()
+            if "frame didn't arrive" in message or "frame didnt arrive" in message or "timeout" in message:
+                _LOGGER.debug("RealSense frame timeout after %sms", timeout_ms)
+                return None
+            raise
         if self._align is not None:
             frames = self._align.process(frames)
 

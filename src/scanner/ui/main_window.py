@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import copy
+import html
 import logging
 import os
 import threading
@@ -13,8 +15,9 @@ from PySide6.QtGui import QImage, QPixmap, QOffscreenSurface, QOpenGLContext, QS
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFormLayout,
-    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLineEdit,
@@ -28,7 +31,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QSplitter,
-    QTabWidget,
+    QScrollArea,
     QTextEdit,
     QToolBox,
     QToolButton,
@@ -42,6 +45,7 @@ from scanner.core.state import ScannerState
 from scanner.core.types import FrameBundle, SessionInfo
 from scanner.io.session import SessionManager
 from scanner.io.logger import setup_logger
+from scanner.io.config import save_config
 from scanner.utils.path import ensure_dir
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -70,7 +74,8 @@ class MainWindow(QMainWindow):
         self._config = config
         self._config_path = config_path
         self._stop_event = stop_event
-        self._lang = str(config.get("ui", {}).get("language", "zh-CN"))
+        self._defaults = copy.deepcopy(config)
+        self._lang = str(config.get("ui", {}).get("language", "en-US"))
         self._translations = self._build_translations()
         self._i18n_refs: Dict[str, list[QWidget]] = {}
         self._defer_ui = bool(config.get("ui", {}).get("defer_ui", True))
@@ -96,8 +101,11 @@ class MainWindow(QMainWindow):
         self._log_entries: list[tuple[str, str]] = []
         self._last_fps = 0.0
         self._device_connected = False
+        self._last_tracking_status = "INIT"
+        self._log_collapsed = False
+        self._toast_timer: Optional[QTimer] = None
 
-        self.setWindowTitle("RealSense D435 手持 3D 扫描建模")
+        self.setWindowTitle(self._t("app.title"))
         self.resize(1400, 820)
         if self._defer_ui:
             placeholder = QWidget(self)
@@ -138,31 +146,19 @@ class MainWindow(QMainWindow):
         self.device_chip.setObjectName("DeviceChip")
         self.fps_label = QLabel(self._t("header.fps") + ": --")
         self.fps_label.setObjectName("HeaderFPS")
+        aligned = bool(self._config.get("device", {}).get("align_to_color", True))
+        self.align_chip = QLabel(self._t("header.aligned") if aligned else self._t("header.not_aligned"))
+        self.align_chip.setObjectName("AlignmentChip")
         header_center_layout.addWidget(self.device_chip)
         header_center_layout.addWidget(self.fps_label)
+        header_center_layout.addWidget(self.align_chip)
 
         header_right = QWidget(header)
         header_right_layout = QHBoxLayout(header_right)
         header_right_layout.setContentsMargins(0, 0, 0, 0)
         header_right_layout.setSpacing(8)
-        self.lang_group = QButtonGroup(self)
-        self.lang_group.setExclusive(True)
-        self.lang_zh_btn = QToolButton(self)
-        self.lang_zh_btn.setCheckable(True)
-        self.lang_zh_btn.setText(self._t("header.lang.zh"))
-        self.lang_en_btn = QToolButton(self)
-        self.lang_en_btn.setCheckable(True)
-        self.lang_en_btn.setText(self._t("header.lang.en"))
-        self.lang_group.addButton(self.lang_zh_btn)
-        self.lang_group.addButton(self.lang_en_btn)
-        if self._lang.startswith("en"):
-            self.lang_en_btn.setChecked(True)
-        else:
-            self.lang_zh_btn.setChecked(True)
-        header_right_layout.addWidget(self.lang_zh_btn)
-        header_right_layout.addWidget(self.lang_en_btn)
         self.opengl_diag_btn = QToolButton(self)
-        self.opengl_diag_btn.setText(self._t("opengl.button"))
+        self.opengl_diag_btn.setText(self._t("header.diagnostics"))
         header_right_layout.addWidget(self.opengl_diag_btn)
         self.settings_btn = QToolButton(self)
         self.settings_btn.setText(self._t("header.settings"))
@@ -188,6 +184,15 @@ class MainWindow(QMainWindow):
         banner_layout.addStretch(1)
         banner_layout.addWidget(self.tracking_banner_action)
         self.tracking_banner.setVisible(False)
+
+        self.toast = QFrame(self)
+        self.toast.setObjectName("Toast")
+        toast_layout = QHBoxLayout(self.toast)
+        toast_layout.setContentsMargins(12, 6, 12, 6)
+        self.toast_label = QLabel("")
+        self.toast_label.setObjectName("ToastLabel")
+        toast_layout.addWidget(self.toast_label)
+        self.toast.setVisible(False)
 
         body = QSplitter(Qt.Horizontal, self)
         body.setChildrenCollapsible(False)
@@ -223,31 +228,41 @@ class MainWindow(QMainWindow):
         actions_row.addWidget(self.pause_btn)
         actions_row.addStretch(1)
 
-        mode_row = QHBoxLayout()
         self.mode_combo = QComboBox()
-        self.mode_combo_io = QComboBox()
-        self._populate_mode_combos(self._config.get("scan", {}).get("mode", "realtime"))
-        mode_row.addWidget(QLabel(self._t("param.mode")))
-        mode_row.addWidget(self.mode_combo, 1)
+        self._populate_mode_combo(self._resolve_initial_mode())
+        mode_form = QFormLayout()
+        self.label_mode = QLabel(self._t("workflow.mode"))
+        mode_form.addRow(self.label_mode, self.mode_combo)
+
+        self.bag_path_edit = QLineEdit()
+        self.bag_path_edit.setPlaceholderText(self._t("workflow.bag_path"))
+        self.bag_path_edit.setText(self._config.get("device", {}).get("bag_path", ""))
+        self.browse_bag_btn = QPushButton(self._t("action.browse"))
+        self.bag_row = QWidget(self)
+        bag_layout = QHBoxLayout(self.bag_row)
+        bag_layout.setContentsMargins(0, 0, 0, 0)
+        bag_layout.setSpacing(6)
+        bag_layout.addWidget(self.bag_path_edit)
+        bag_layout.addWidget(self.browse_bag_btn)
+        self.bag_row_label = QLabel(self._t("workflow.bag_path"))
+        mode_form.addRow(self.bag_row_label, self.bag_row)
 
         status_row = QHBoxLayout()
         self.state_label = QLabel(self._t("workflow.state.idle"))
         self.state_label.setObjectName("StateLabel")
-        self.tracking_pill = QLabel(self._t("workflow.tracking.ok"))
+        self.tracking_pill = QLabel(self._t("workflow.tracking.init"))
         self.tracking_pill.setObjectName("TrackingPill")
-        self.tracking_pill.setProperty("state", "ok")
+        self.tracking_pill.setProperty("state", "init")
         status_row.addWidget(self.state_label)
         status_row.addStretch(1)
         status_row.addWidget(self.tracking_pill)
 
         workflow_layout.addLayout(actions_row)
-        workflow_layout.addLayout(mode_row)
+        workflow_layout.addLayout(mode_form)
         workflow_layout.addLayout(status_row)
         self.info_label = QLabel("")
         self.info_label.setObjectName("InfoLabel")
         workflow_layout.addWidget(self.info_label)
-
-        self.tabs = QTabWidget(self)
 
         params_tab = QWidget(self)
         params_layout = QVBoxLayout(params_tab)
@@ -255,7 +270,8 @@ class MainWindow(QMainWindow):
         params_layout.setSpacing(8)
 
         basic_adv_row = QHBoxLayout()
-        basic_adv_row.addWidget(QLabel(self._t("tabs.parameters")))
+        self.params_title_label = QLabel(self._t("section.parameters"))
+        basic_adv_row.addWidget(self.params_title_label)
         basic_adv_row.addStretch(1)
         self.basic_adv_group = QButtonGroup(self)
         self.basic_adv_group.setExclusive(True)
@@ -270,6 +286,9 @@ class MainWindow(QMainWindow):
         self.basic_btn.setChecked(True)
         basic_adv_row.addWidget(self.basic_btn)
         basic_adv_row.addWidget(self.advanced_btn)
+        self.restore_defaults_btn = QToolButton(self)
+        self.restore_defaults_btn.setText(self._t("action.restore_defaults"))
+        basic_adv_row.addWidget(self.restore_defaults_btn)
         params_layout.addLayout(basic_adv_row)
 
         self.params_toolbox = QToolBox(self)
@@ -287,6 +306,13 @@ class MainWindow(QMainWindow):
         self.depth_trunc_spin.setRange(0.3, 3.0)
         self.depth_trunc_spin.setValue(float(self._config.get("fusion", {}).get("depth_trunc", 1.0)))
 
+        def range_tip(min_v: float, max_v: float, unit: str) -> str:
+            return self._t("tooltip.range").format(min=min_v, max=max_v, unit=unit)
+
+        self.voxel_spin.setToolTip(range_tip(0.001, 0.02, " m"))
+        self.sdf_spin.setToolTip(range_tip(0.005, 0.1, " m"))
+        self.depth_trunc_spin.setToolTip(range_tip(0.3, 3.0, " m"))
+
         self.key_trans_spin = QDoubleSpinBox()
         self.key_trans_spin.setDecimals(3)
         self.key_trans_spin.setRange(0.005, 0.2)
@@ -295,6 +321,8 @@ class MainWindow(QMainWindow):
         self.key_rot_spin.setDecimals(1)
         self.key_rot_spin.setRange(1.0, 30.0)
         self.key_rot_spin.setValue(float(self._config.get("keyframe", {}).get("min_rotation_deg", 5.0)))
+        self.key_trans_spin.setToolTip(range_tip(0.005, 0.2, " m"))
+        self.key_rot_spin.setToolTip(range_tip(1.0, 30.0, " °"))
 
         self.loop_gap_spin = QSpinBox()
         self.loop_gap_spin.setRange(10, 200)
@@ -306,6 +334,9 @@ class MainWindow(QMainWindow):
         self.loop_candidates_spin = QSpinBox()
         self.loop_candidates_spin.setRange(1, 20)
         self.loop_candidates_spin.setValue(int(self._config.get("loop_closure", {}).get("max_candidates", 5)))
+        self.loop_gap_spin.setToolTip(range_tip(10, 200, " f"))
+        self.loop_dist_spin.setToolTip(range_tip(0.1, 2.0, " m"))
+        self.loop_candidates_spin.setToolTip(range_tip(1, 20, ""))
 
         self.simplify_spin = QSpinBox()
         self.simplify_spin.setRange(1000, 2000000)
@@ -313,6 +344,8 @@ class MainWindow(QMainWindow):
         self.smooth_spin = QSpinBox()
         self.smooth_spin.setRange(0, 50)
         self.smooth_spin.setValue(int(self._config.get("mesh", {}).get("smooth_iterations", 5)))
+        self.simplify_spin.setToolTip(range_tip(1000, 2000000, " tris"))
+        self.smooth_spin.setToolTip(range_tip(0, 50, ""))
 
         self.preview_mesh_checkbox = QCheckBox(self._t("param.preview_mesh"))
         self.preview_mesh_checkbox.setChecked(bool(self._config.get("fusion", {}).get("preview_mesh", False)))
@@ -323,19 +356,7 @@ class MainWindow(QMainWindow):
         self.reset_camera_btn = QPushButton(self._t("action.reset_camera"))
         self.toggle_axes_btn = QPushButton(self._t("action.toggle_axis"))
 
-        self.bag_path_edit = QLineEdit()
-        self.bag_path_edit.setPlaceholderText(self._t("param.bag_path"))
-        self.bag_path_edit.setText(self._config.get("device", {}).get("bag_path", ""))
-        self.browse_bag_btn = QPushButton(self._t("action.browse"))
-        self.record_checkbox = QCheckBox(self._t("workflow.mode.record"))
-        self.record_checkbox.setChecked(bool(self._config.get("device", {}).get("record_bag", False)))
-
-        self.export_combo = QComboBox()
-        self.export_combo.addItems(["ply", "obj", "stl"])
-        self.export_combo.setCurrentText(self._config.get("export", {}).get("default_mesh_format", "ply"))
-        self.cloud_export_combo = QComboBox()
-        self.cloud_export_combo.addItems(["ply", "pcd"])
-        self.cloud_export_combo.setCurrentText(self._config.get("export", {}).get("default_cloud_format", "ply"))
+        # Bag path widgets are created in workflow section.
 
         def unit_widget(widget: QWidget, unit_text: str) -> QWidget:
             box = QWidget(self)
@@ -373,7 +394,7 @@ class MainWindow(QMainWindow):
         self.key_dr_widget = unit_widget(self.key_rot_spin, "°")
         tracking_layout.addRow(self.label_keyframe_dt, self.key_dt_widget)
         tracking_layout.addRow(self.label_keyframe_dr, self.key_dr_widget)
-        self.tracking_status_label = QLabel(self._t("workflow.tracking.ok"))
+        self.tracking_status_label = QLabel(self._t("workflow.tracking.init"))
         tracking_layout.addRow(self.label_tracking_state, self.tracking_status_label)
         self.params_toolbox.addItem(tracking_widget, self._t("group.tracking"))
 
@@ -407,26 +428,6 @@ class MainWindow(QMainWindow):
         view_layout.addRow(self.reset_camera_btn, self.toggle_axes_btn)
         self.params_toolbox.addItem(view_widget, self._t("group.view"))
 
-        # IO group
-        io_widget = QWidget(self)
-        io_layout = QFormLayout(io_widget)
-        bag_row = QWidget(self)
-        bag_layout = QHBoxLayout(bag_row)
-        bag_layout.setContentsMargins(0, 0, 0, 0)
-        bag_layout.setSpacing(6)
-        bag_layout.addWidget(self.bag_path_edit)
-        bag_layout.addWidget(self.browse_bag_btn)
-        self.label_mode = QLabel(self._t("param.mode"))
-        self.label_bag_path = QLabel(self._t("param.bag_path"))
-        self.label_mesh_format = QLabel(self._t("param.mesh_format"))
-        self.label_cloud_format = QLabel(self._t("param.cloud_format"))
-        io_layout.addRow(self.label_mode, self.mode_combo_io)
-        io_layout.addRow(self.label_bag_path, bag_row)
-        io_layout.addRow(self.record_checkbox)
-        io_layout.addRow(self.label_mesh_format, self.export_combo)
-        io_layout.addRow(self.label_cloud_format, self.cloud_export_combo)
-        self.params_toolbox.addItem(io_widget, self._t("group.io"))
-
         self._advanced_widgets = [
             self.label_sdf,
             self.sdf_widget,
@@ -438,8 +439,6 @@ class MainWindow(QMainWindow):
             self.smooth_spin,
             self.preview_mesh_checkbox,
             self.toggle_axes_btn,
-            self.label_cloud_format,
-            self.cloud_export_combo,
         ]
 
         params_layout.addWidget(self.params_toolbox, 1)
@@ -448,41 +447,39 @@ class MainWindow(QMainWindow):
         export_layout = QVBoxLayout(export_tab)
         export_layout.setContentsMargins(8, 8, 8, 8)
         export_layout.setSpacing(8)
-        self.export_title_label = QLabel(self._t("export.title"))
-        export_layout.addWidget(self.export_title_label)
 
-        self.export_stack = QStackedWidget(self)
-        export_layout.addWidget(self.export_stack, 1)
-
-        self.export_type_combo = QComboBox()
-        self._populate_export_type_combo("mesh")
-        type_page = QWidget(self)
-        type_layout = QFormLayout(type_page)
-        self.label_export_type = QLabel(self._t("export.step.type"))
-        type_layout.addRow(self.label_export_type, self.export_type_combo)
-        self.export_stack.addWidget(type_page)
+        export_form = QFormLayout()
+        self.export_target_combo = QComboBox()
+        self._populate_export_target_combo("mesh")
+        self.label_export_target = QLabel(self._t("export.target"))
+        export_form.addRow(self.label_export_target, self.export_target_combo)
 
         self.export_format_combo = QComboBox()
-        format_page = QWidget(self)
-        format_layout = QFormLayout(format_page)
-        self.label_export_format = QLabel(self._t("export.step.format"))
-        format_layout.addRow(self.label_export_format, self.export_format_combo)
-        self.export_stack.addWidget(format_page)
+        self.label_export_format = QLabel(self._t("export.format"))
+        export_form.addRow(self.label_export_format, self.export_format_combo)
+        export_layout.addLayout(export_form)
 
-        options_page = QWidget(self)
-        options_layout = QFormLayout(options_page)
+        self.export_options_group = QGroupBox(self._t("export.options"))
+        options_layout = QFormLayout(self.export_options_group)
         self.export_simplify_check = QCheckBox(self._t("export.option.simplify"))
         self.export_smooth_check = QCheckBox(self._t("export.option.smooth"))
+        self.export_color_check = QCheckBox(self._t("export.option.color"))
         self.export_simplify_check.setChecked(True)
         self.export_smooth_check.setChecked(True)
+        self.export_color_check.setChecked(True)
+        self.label_export_coords = QLabel(self._t("export.option.coords"))
+        self.export_coords_combo = QComboBox()
+        self.export_coords_combo.addItem(self._t("export.coords.opengl"), "open3d")
+        self.export_coords_combo.addItem(self._t("export.coords.unity"), "unity")
         options_layout.addRow(self.export_simplify_check)
         options_layout.addRow(self.export_smooth_check)
-        self.export_stack.addWidget(options_page)
+        options_layout.addRow(self.export_color_check)
+        options_layout.addRow(self.label_export_coords, self.export_coords_combo)
+        export_layout.addWidget(self.export_options_group)
 
-        path_page = QWidget(self)
-        path_layout = QFormLayout(path_page)
+        path_form = QFormLayout()
         self.export_path_edit = QLineEdit()
-        self.export_path_edit.setPlaceholderText(self._t("export.step.path"))
+        self.export_path_edit.setPlaceholderText(self._t("export.output.placeholder"))
         self.export_path_btn = QPushButton(self._t("action.browse"))
         path_row = QWidget(self)
         path_row_layout = QHBoxLayout(path_row)
@@ -490,48 +487,71 @@ class MainWindow(QMainWindow):
         path_row_layout.setSpacing(6)
         path_row_layout.addWidget(self.export_path_edit)
         path_row_layout.addWidget(self.export_path_btn)
-        self.label_export_path = QLabel(self._t("export.step.path"))
-        path_layout.addRow(self.label_export_path, path_row)
-        self.export_stack.addWidget(path_page)
+        self.label_export_path = QLabel(self._t("export.output"))
+        path_form.addRow(self.label_export_path, path_row)
+        export_layout.addLayout(path_form)
 
-        export_page = QWidget(self)
-        export_page_layout = QVBoxLayout(export_page)
-        export_page_layout.addStretch(1)
-        self.export_run_btn = QPushButton(self._t("export.action.export"))
-        self.export_run_btn.setObjectName("PrimaryButton")
-        export_page_layout.addWidget(self.export_run_btn)
-        self.export_stack.addWidget(export_page)
+        self.export_default_label = QLabel(self._default_export_hint())
+        self.export_default_label.setObjectName("ExportHint")
+        export_layout.addWidget(self.export_default_label)
 
-        nav_row = QHBoxLayout()
-        self.export_prev_btn = QPushButton("◀")
-        self.export_next_btn = QPushButton("▶")
-        nav_row.addWidget(self.export_prev_btn)
-        nav_row.addWidget(self.export_next_btn)
-        nav_row.addStretch(1)
-        export_layout.addLayout(nav_row)
-
-        session_tab = QWidget(self)
-        session_layout = QVBoxLayout(session_tab)
+        self.session_group = QGroupBox(self._t("section.session"))
+        session_layout = QVBoxLayout(self.session_group)
         session_layout.setContentsMargins(8, 8, 8, 8)
+        session_layout.setSpacing(8)
         self.optimize_btn = QPushButton(self._t("workflow.optimize"))
         self.save_session_btn = QPushButton(self._t("session.save"))
         self.load_session_btn = QPushButton(self._t("session.load"))
         session_layout.addWidget(self.optimize_btn)
         session_layout.addWidget(self.save_session_btn)
         session_layout.addWidget(self.load_session_btn)
-        session_layout.addStretch(1)
+        export_layout.addWidget(self.session_group)
 
-        self.tabs.addTab(params_tab, self._t("tabs.parameters"))
-        self.tabs.addTab(export_tab, self._t("tabs.export"))
-        self.tabs.addTab(session_tab, self._t("tabs.session"))
+        export_layout.addStretch(1)
+        self.export_run_btn = QPushButton(self._t("export.action.export"))
+        self.export_run_btn.setObjectName("SecondaryButton")
+        export_layout.addWidget(self.export_run_btn)
+
+        self.sidebar_stack = QStackedWidget(self)
+        self.sidebar_stack.addWidget(params_tab)
+        self.sidebar_stack.addWidget(export_tab)
+
+        self.sidebar_params_btn = QToolButton(self)
+        self.sidebar_params_btn.setCheckable(True)
+        self.sidebar_params_btn.setObjectName("SidebarToggle")
+        self.sidebar_params_btn.setText(self._t("section.parameters"))
+        self.sidebar_export_btn = QToolButton(self)
+        self.sidebar_export_btn.setCheckable(True)
+        self.sidebar_export_btn.setObjectName("SidebarToggle")
+        self.sidebar_export_btn.setText(self._t("section.export"))
+        self.sidebar_btn_group = QButtonGroup(self)
+        self.sidebar_btn_group.setExclusive(True)
+        self.sidebar_btn_group.addButton(self.sidebar_params_btn, 0)
+        self.sidebar_btn_group.addButton(self.sidebar_export_btn, 1)
+        self.sidebar_params_btn.setChecked(True)
+
+        switch_row = QHBoxLayout()
+        switch_row.setSpacing(6)
+        switch_row.addWidget(self.sidebar_params_btn)
+        switch_row.addWidget(self.sidebar_export_btn)
+        switch_row.addStretch(1)
+
+        self.sidebar_scroll = QScrollArea(self)
+        self.sidebar_scroll.setWidgetResizable(True)
+        self.sidebar_scroll.setFrameShape(QFrame.NoFrame)
+        self.sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.sidebar_scroll.setWidget(self.sidebar_stack)
 
         right_layout.addWidget(workflow_card, 0)
-        right_layout.addWidget(self.tabs, 1)
+        right_layout.addLayout(switch_row)
+        right_layout.addWidget(self.sidebar_scroll, 1)
 
+        right_panel.setMinimumWidth(320)
         body.addWidget(left_panel)
         body.addWidget(right_panel)
-        body.setStretchFactor(0, 62)
-        body.setStretchFactor(1, 38)
+        body.setStretchFactor(0, 4)
+        body.setStretchFactor(1, 1)
+        body.setSizes([int(self.width() * 0.8), max(320, int(self.width() * 0.2))])
 
         self.log_panel = QFrame(self)
         self.log_panel.setObjectName("LogPanel")
@@ -540,6 +560,10 @@ class MainWindow(QMainWindow):
         log_layout.setSpacing(6)
 
         log_header = QHBoxLayout()
+        self.log_toggle_btn = QToolButton(self)
+        self.log_toggle_btn.setText("▾")
+        self.log_toggle_btn.setObjectName("LogToggle")
+        log_header.addWidget(self.log_toggle_btn)
         self.label_log_title = QLabel(self._t("log.title"))
         log_header.addWidget(self.label_log_title)
         log_header.addStretch(1)
@@ -562,13 +586,15 @@ class MainWindow(QMainWindow):
 
         self.log_text = QTextEdit(self)
         self.log_text.setReadOnly(True)
-        self.log_text.setFixedHeight(180)
+        self.log_text.setMinimumHeight(160)
+        self.log_text.setMaximumHeight(220)
 
         log_layout.addLayout(log_header)
         log_layout.addWidget(self.log_text)
 
         root_layout.addWidget(header)
         root_layout.addWidget(self.tracking_banner)
+        root_layout.addWidget(self.toast)
         root_layout.addWidget(body, 1)
         root_layout.addWidget(self.log_panel, 0)
         self.setCentralWidget(central)
@@ -577,9 +603,8 @@ class MainWindow(QMainWindow):
         self.pause_btn.clicked.connect(self._on_secondary_clicked)
         self.optimize_btn.clicked.connect(self.optimize_scan)
         self.export_run_btn.clicked.connect(self.export_result)
-        self.export_prev_btn.clicked.connect(self._export_prev)
-        self.export_next_btn.clicked.connect(self._export_next)
-        self.export_type_combo.currentTextChanged.connect(self._update_export_formats)
+        self.export_target_combo.currentTextChanged.connect(self._update_export_formats)
+        self.export_format_combo.currentTextChanged.connect(self._update_export_options)
         self.export_path_btn.clicked.connect(self._choose_export_path)
         self.save_session_btn.clicked.connect(self.save_session)
         self.load_session_btn.clicked.connect(self.load_session)
@@ -587,24 +612,28 @@ class MainWindow(QMainWindow):
         self.reset_camera_btn.clicked.connect(self._on_reset_camera)
         self.toggle_axes_btn.clicked.connect(self._on_toggle_axes)
         self.browse_bag_btn.clicked.connect(self._choose_bag_path)
-        self.lang_zh_btn.clicked.connect(lambda: self._set_language("zh-CN"))
-        self.lang_en_btn.clicked.connect(lambda: self._set_language("en-US"))
         self.opengl_diag_btn.clicked.connect(self._diagnose_opengl)
+        self.settings_btn.clicked.connect(self._open_settings)
         self.exit_btn.clicked.connect(self._request_exit)
         self.basic_btn.clicked.connect(self._apply_basic_mode)
         self.advanced_btn.clicked.connect(self._apply_advanced_mode)
+        self.restore_defaults_btn.clicked.connect(self._restore_default_params)
         self.log_clear_btn.clicked.connect(self._clear_log)
         self.log_copy_btn.clicked.connect(self._copy_log)
+        self.log_toggle_btn.clicked.connect(self._toggle_log_panel)
         self.log_info_chk.clicked.connect(self._refresh_log_view)
         self.log_warn_chk.clicked.connect(self._refresh_log_view)
         self.log_error_chk.clicked.connect(self._refresh_log_view)
         self.tracking_banner_action.clicked.connect(self._show_tracking_tips)
-        self.mode_combo.currentTextChanged.connect(lambda text: self._sync_mode_combo(self.mode_combo, self.mode_combo_io, text))
-        self.mode_combo_io.currentTextChanged.connect(lambda text: self._sync_mode_combo(self.mode_combo_io, self.mode_combo, text))
+        self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
+        self.sidebar_params_btn.clicked.connect(lambda: self._set_sidebar_page(0))
+        self.sidebar_export_btn.clicked.connect(lambda: self._set_sidebar_page(1))
 
         self._update_export_formats()
+        self._update_export_options()
+        self._on_mode_changed()
         self._apply_basic_mode()
-        self._apply_theme("dark")
+        self._apply_theme(str(self._config.get("ui", {}).get("theme", "light")))
         self._on_view_mode(self.view_combo.currentText())
         if not self._enable_3d_viewer:
             self.view_combo.setToolTip(self._t("view.disabled"))
@@ -623,15 +652,21 @@ class MainWindow(QMainWindow):
         meta_label.setObjectName("PreviewMeta")
         align_label = QLabel(self._t("preview.aligned") if self._config.get("device", {}).get("align_to_color", True) else self._t("preview.not_aligned"))
         align_label.setObjectName("PreviewAlign")
+        status_dot = QFrame(self)
+        status_dot.setObjectName("PreviewStatusDot")
+        status_dot.setFixedSize(8, 8)
+        status_dot.setProperty("state", "ok" if self._config.get("device", {}).get("align_to_color", True) else "warn")
         header.addWidget(title_label)
         header.addStretch(1)
         header.addWidget(meta_label)
+        header.addWidget(status_dot)
         header.addWidget(align_label)
 
         if kind == "rgb":
             self.rgb_title_label = title_label
             self.rgb_meta_label = meta_label
             self.rgb_align_label = align_label
+            self.rgb_status_dot = status_dot
             self.color_label = QLabel("RGB")
             self.color_label.setAlignment(Qt.AlignCenter)
             self.color_label.setObjectName("PreviewImage")
@@ -642,6 +677,7 @@ class MainWindow(QMainWindow):
             self.depth_title_label = title_label
             self.depth_meta_label = meta_label
             self.depth_align_label = align_label
+            self.depth_status_dot = status_dot
             self.depth_label = QLabel("Depth")
             self.depth_label.setAlignment(Qt.AlignCenter)
             self.depth_label.setObjectName("PreviewImage")
@@ -678,11 +714,12 @@ class MainWindow(QMainWindow):
                 "app.title": "DepthForge 手持 3D 扫描",
                 "app.loading": "正在初始化界面…",
                 "header.device.connected": "已连接",
-                "header.device.disconnected": "未检测到设备",
-                "header.fps": "帧率",
-                "header.lang.zh": "中文",
-                "header.lang.en": "EN",
-                "header.settings": "设置",
+                "header.device.disconnected": "未连接设备",
+                "header.fps": "FPS",
+                "header.aligned": "已对齐",
+                "header.not_aligned": "未对齐",
+                "header.diagnostics": "诊断",
+                "header.settings": "设置 ⚙️",
                 "header.exit": "退出",
                 "preview.rgb.title": "RGB",
                 "preview.depth.title": "Depth",
@@ -692,6 +729,8 @@ class MainWindow(QMainWindow):
                 "workflow.primary.stop": "停止",
                 "workflow.secondary.pause": "暂停",
                 "workflow.secondary.resume": "继续",
+                "workflow.mode": "模式",
+                "workflow.bag_path": "Bag 路径",
                 "workflow.optimize": "全局优化",
                 "workflow.state.idle": "空闲",
                 "workflow.state.running": "运行中",
@@ -699,57 +738,59 @@ class MainWindow(QMainWindow):
                 "workflow.state.playback": "回放中",
                 "workflow.state.recording": "录制中",
                 "workflow.state.exporting": "导出中",
-                "workflow.tracking.ok": "跟踪正常",
-                "workflow.tracking.warn": "跟踪警告",
-                "workflow.tracking.lost": "跟踪丢失",
-                "tabs.parameters": "参数",
-                "tabs.export": "导出",
-                "tabs.session": "会话",
+                "workflow.tracking.init": "初始化中",
+                "workflow.tracking.ok": "正常",
+                "workflow.tracking.lost": "丢失",
+                "section.parameters": "参数",
+                "section.export": "导出",
+                "section.session": "会话",
                 "toggle.basic": "基础",
                 "toggle.advanced": "高级",
+                "action.restore_defaults": "恢复默认值",
                 "group.reconstruction": "重建",
                 "group.tracking": "跟踪",
                 "group.loop": "回环",
                 "group.mesh": "网格",
                 "group.view": "视图",
-                "group.io": "输入输出",
                 "param.voxel": "体素大小",
                 "param.sdf": "TSDF 截断",
-                "param.depth_max": "深度上限",
-                "param.keyframe_dt": "关键帧间隔",
-                "param.keyframe_dr": "关键帧旋转",
+                "param.depth_max": "深度截断",
+                "param.keyframe_dt": "关键帧 Δt",
+                "param.keyframe_dr": "关键帧 ΔR",
                 "param.tracking_state": "跟踪状态",
                 "param.loop_gap": "回环间隔",
                 "param.loop_dist": "回环距离",
-                "param.loop_cand": "候选数",
+                "param.loop_cand": "回环候选数",
                 "param.mesh_tri": "目标三角面数",
                 "param.mesh_smooth": "平滑迭代",
                 "param.preview_mesh": "预览网格",
                 "param.view_mode": "视图模式",
-                "param.mode": "模式",
-                "mode.realtime": "实时",
-                "mode.semi": "半实时",
-                "mode.offline": "离线",
-                "param.bag_path": "bag 路径",
-                "param.mesh_format": "网格格式",
-                "param.cloud_format": "点云格式",
                 "action.reset_camera": "重置相机",
-                "action.toggle_axis": "切换坐标轴",
-                "action.browse": "浏览",
-                "workflow.mode.record": "录制",
+                "action.toggle_axis": "显示坐标轴",
+                "action.browse": "浏览…",
+                "mode.realtime": "实时",
+                "mode.playback": "回放",
+                "mode.record": "录制",
                 "view.pointcloud": "点云",
                 "view.mesh": "网格",
-                "view.rgbd": "RGBD",
+                "view.rgbd": "RGB-D",
                 "view.disabled": "当前系统不支持 OpenGL 3.2，已禁用 3D 视图",
-                "export.title": "导出向导",
-                "export.type.mesh": "网格",
-                "export.type.pointcloud": "点云",
-                "export.step.type": "类型",
-                "export.step.format": "格式",
-                "export.step.path": "保存路径",
+                "export.target": "导出目标",
+                "export.target.mesh": "网格",
+                "export.target.pointcloud": "点云",
+                "export.format": "格式",
+                "export.options": "选项",
                 "export.option.simplify": "简化",
                 "export.option.smooth": "平滑",
+                "export.option.color": "带颜色",
+                "export.option.coords": "坐标系",
+                "export.coords.opengl": "Open3D（右手）",
+                "export.coords.unity": "Unity（左手）",
+                "export.output": "输出路径",
+                "export.output.placeholder": "选择输出路径",
+                "export.naming": "默认命名",
                 "export.action.export": "导出",
+                "export.action.exporting": "导出中…",
                 "session.save": "保存会话",
                 "session.load": "加载会话",
                 "log.title": "日志",
@@ -759,22 +800,46 @@ class MainWindow(QMainWindow):
                 "log.copy": "复制",
                 "log.clear": "清空",
                 "log.autoscroll": "自动滚动",
-                "banner.tracking_lost.body": "跟踪丢失：请减速、拉远、增加纹理或降低 depth_trunc",
+                "banner.tracking_lost.body": "跟踪丢失：请放慢移动、增加纹理或调整 depth_trunc",
                 "banner.tracking_lost.action": "查看建议",
-                "banner.tracking_lost.tips": "建议：\n- 减速并保持匀速\n- 增加相机与物体距离\n- 提升纹理（贴纸/报纸）\n- 适当降低 depth_trunc",
-                "opengl.button": "OpenGL 诊断",
+                "banner.tracking_lost.tips": "建议：\n- 缓慢稳定移动\n- 适当拉远相机\n- 增加纹理（贴纸/报纸）\n- 适当降低 depth_trunc",
+                "settings.title": "设置",
+                "settings.language": "语言",
+                "settings.language.en": "English (US)",
+                "settings.language.zh": "中文（简体）",
+                "settings.theme": "主题",
+                "settings.theme.system": "跟随系统",
+                "settings.theme.light": "浅色",
+                "settings.theme.dark": "深色",
+                "settings.performance": "性能",
+                "settings.performance.high": "高",
+                "settings.performance.balanced": "平衡",
+                "settings.performance.low": "低",
+                "settings.shortcuts": "快捷键",
+                "settings.shortcuts.hint": "常用快捷键将在此展示。",
+                "tooltip.range": "范围：{min}–{max}{unit}",
+                "info.intrinsics": "内参 fx={fx:.1f} fy={fy:.1f} cx={cx:.1f} cy={cy:.1f}",
+                "error.param.title": "参数错误",
+                "error.device.title": "设备错误",
+                "error.generic.title": "错误",
+                "error.bag.required": "请填写 bag 路径",
+                "error.bag.extension": "bag 文件必须以 .bag 结尾",
+                "error.bag.dir_missing": "bag 目录不存在: {path}",
+                "error.bag.dir_unwritable": "bag 目录不可写: {path}",
+                "error.bag.missing": "bag 文件不存在: {path}",
                 "opengl.title": "OpenGL 诊断",
                 "opengl.fail": "无法获取 OpenGL 信息",
             },
             "en-US": {
-                "app.title": "DepthForge Handheld 3D Scanner",
+                "app.title": "DepthForge Handheld 3D Scan",
                 "app.loading": "Loading UI…",
                 "header.device.connected": "Connected",
                 "header.device.disconnected": "No device",
                 "header.fps": "FPS",
-                "header.lang.zh": "ZH",
-                "header.lang.en": "EN",
-                "header.settings": "Settings",
+                "header.aligned": "Aligned",
+                "header.not_aligned": "Not aligned",
+                "header.diagnostics": "Diagnostics",
+                "header.settings": "Settings ⚙️",
                 "header.exit": "Exit",
                 "preview.rgb.title": "RGB",
                 "preview.depth.title": "Depth",
@@ -784,32 +849,34 @@ class MainWindow(QMainWindow):
                 "workflow.primary.stop": "Stop",
                 "workflow.secondary.pause": "Pause",
                 "workflow.secondary.resume": "Resume",
-                "workflow.optimize": "Global Optimize",
+                "workflow.mode": "Mode",
+                "workflow.bag_path": "Bag path",
+                "workflow.optimize": "Global optimize",
                 "workflow.state.idle": "Idle",
                 "workflow.state.running": "Running",
                 "workflow.state.paused": "Paused",
                 "workflow.state.playback": "Playback",
                 "workflow.state.recording": "Recording",
                 "workflow.state.exporting": "Exporting",
-                "workflow.tracking.ok": "Tracking OK",
-                "workflow.tracking.warn": "Tracking Warn",
-                "workflow.tracking.lost": "Tracking Lost",
-                "tabs.parameters": "Parameters",
-                "tabs.export": "Export",
-                "tabs.session": "Session",
+                "workflow.tracking.init": "Initializing",
+                "workflow.tracking.ok": "OK",
+                "workflow.tracking.lost": "Lost",
+                "section.parameters": "Parameters",
+                "section.export": "Export",
+                "section.session": "Session",
                 "toggle.basic": "Basic",
                 "toggle.advanced": "Advanced",
+                "action.restore_defaults": "Restore defaults",
                 "group.reconstruction": "Reconstruction",
                 "group.tracking": "Tracking",
                 "group.loop": "Loop Closure",
                 "group.mesh": "Meshing",
                 "group.view": "View",
-                "group.io": "IO",
                 "param.voxel": "Voxel size",
-                "param.sdf": "TSDF truncation",
-                "param.depth_max": "Depth max",
-                "param.keyframe_dt": "Keyframe interval",
-                "param.keyframe_dr": "Keyframe rotation",
+                "param.sdf": "SDF truncation",
+                "param.depth_max": "Depth trunc",
+                "param.keyframe_dt": "Keyframe Δt",
+                "param.keyframe_dr": "Keyframe ΔR",
                 "param.tracking_state": "Tracking status",
                 "param.loop_gap": "Loop gap",
                 "param.loop_dist": "Loop distance",
@@ -818,30 +885,32 @@ class MainWindow(QMainWindow):
                 "param.mesh_smooth": "Smooth iterations",
                 "param.preview_mesh": "Preview mesh",
                 "param.view_mode": "View mode",
-                "param.mode": "Mode",
-                "mode.realtime": "Realtime",
-                "mode.semi": "Semi",
-                "mode.offline": "Offline",
-                "param.bag_path": "bag path",
-                "param.mesh_format": "Mesh format",
-                "param.cloud_format": "Cloud format",
                 "action.reset_camera": "Reset camera",
-                "action.toggle_axis": "Toggle axis",
-                "action.browse": "Browse",
-                "workflow.mode.record": "Record",
+                "action.toggle_axis": "Show axis",
+                "action.browse": "Browse…",
+                "mode.realtime": "Realtime",
+                "mode.playback": "Playback",
+                "mode.record": "Record",
                 "view.pointcloud": "Pointcloud",
                 "view.mesh": "Mesh",
-                "view.rgbd": "RGBD",
+                "view.rgbd": "RGB-D",
                 "view.disabled": "OpenGL 3.2 is not available on this system. 3D view disabled.",
-                "export.title": "Export Wizard",
-                "export.type.mesh": "Mesh",
-                "export.type.pointcloud": "Pointcloud",
-                "export.step.type": "Type",
-                "export.step.format": "Format",
-                "export.step.path": "Save path",
+                "export.target": "Export target",
+                "export.target.mesh": "Mesh",
+                "export.target.pointcloud": "Pointcloud",
+                "export.format": "Format",
+                "export.options": "Options",
                 "export.option.simplify": "Simplify",
                 "export.option.smooth": "Smooth",
+                "export.option.color": "With color",
+                "export.option.coords": "Coordinate system",
+                "export.coords.opengl": "Open3D (right-handed)",
+                "export.coords.unity": "Unity (left-handed)",
+                "export.output": "Output path",
+                "export.output.placeholder": "Choose output path",
+                "export.naming": "Default name",
                 "export.action.export": "Export",
+                "export.action.exporting": "Exporting…",
                 "session.save": "Save session",
                 "session.load": "Load session",
                 "log.title": "Log",
@@ -851,10 +920,33 @@ class MainWindow(QMainWindow):
                 "log.copy": "Copy",
                 "log.clear": "Clear",
                 "log.autoscroll": "Auto-scroll",
-                "banner.tracking_lost.body": "Tracking lost: slow down, increase distance, add texture, or reduce depth_trunc",
+                "banner.tracking_lost.body": "Tracking lost: move slowly, add texture, or adjust depth truncation.",
                 "banner.tracking_lost.action": "View tips",
                 "banner.tracking_lost.tips": "Tips:\n- Move slower and steadily\n- Increase distance to the object\n- Add texture (stickers/newspaper)\n- Reduce depth_trunc",
-                "opengl.button": "OpenGL",
+                "settings.title": "Settings",
+                "settings.language": "Language",
+                "settings.language.en": "English (US)",
+                "settings.language.zh": "中文（简体）",
+                "settings.theme": "Theme",
+                "settings.theme.system": "System",
+                "settings.theme.light": "Light",
+                "settings.theme.dark": "Dark",
+                "settings.performance": "Performance",
+                "settings.performance.high": "High",
+                "settings.performance.balanced": "Balanced",
+                "settings.performance.low": "Low",
+                "settings.shortcuts": "Shortcuts",
+                "settings.shortcuts.hint": "Common shortcuts will appear here.",
+                "tooltip.range": "Range: {min}–{max} {unit}",
+                "info.intrinsics": "Intrinsics fx={fx:.1f} fy={fy:.1f} cx={cx:.1f} cy={cy:.1f}",
+                "error.param.title": "Parameter error",
+                "error.device.title": "Device error",
+                "error.generic.title": "Error",
+                "error.bag.required": "Please choose a bag path.",
+                "error.bag.extension": "Bag file must end with .bag",
+                "error.bag.dir_missing": "Bag directory does not exist: {path}",
+                "error.bag.dir_unwritable": "Bag directory is not writable: {path}",
+                "error.bag.missing": "Bag file not found: {path}",
                 "opengl.title": "OpenGL Diagnostics",
                 "opengl.fail": "Failed to query OpenGL info",
             },
@@ -864,33 +956,54 @@ class MainWindow(QMainWindow):
         lang_pack = self._translations.get(self._lang, {})
         if key in lang_pack:
             return lang_pack[key]
-        return self._translations.get("zh-CN", {}).get(key, key)
+        return self._translations.get("en-US", {}).get(key, self._translations.get("zh-CN", {}).get(key, key))
 
     def _set_language(self, lang: str) -> None:
         self._lang = lang
+        self._config.setdefault("ui", {})["language"] = lang
+        self._save_config()
         self._apply_language()
 
+    def _save_config(self) -> None:
+        try:
+            save_config(self._config_path, self._config)
+        except Exception as exc:
+            self.append_log(f"配置保存失败: {exc}", level="warn")
+
     def _apply_language(self) -> None:
+        self.setWindowTitle(self._t("app.title"))
         self.app_title_label.setText(self._t("app.title"))
         self.device_chip.setText(
             self._t("header.device.connected") if self._device_connected else self._t("header.device.disconnected")
         )
-        self.fps_label.setText(self._t("header.fps") + f": {self._last_fps:.1f}" if self._last_fps else self._t("header.fps") + ": --")
-        self.lang_zh_btn.setText(self._t("header.lang.zh"))
-        self.lang_en_btn.setText(self._t("header.lang.en"))
-        self.opengl_diag_btn.setText(self._t("opengl.button"))
+        self.fps_label.setText(
+            self._t("header.fps") + f": {self._last_fps:.1f}" if self._last_fps else self._t("header.fps") + ": --"
+        )
+        aligned = bool(self._config.get("device", {}).get("align_to_color", True))
+        self.align_chip.setText(self._t("header.aligned") if aligned else self._t("header.not_aligned"))
+        self.opengl_diag_btn.setText(self._t("header.diagnostics"))
         self.settings_btn.setText(self._t("header.settings"))
         self.exit_btn.setText(self._t("header.exit"))
+
         self.tracking_banner_label.setText(self._t("banner.tracking_lost.body"))
         self.tracking_banner_action.setText(self._t("banner.tracking_lost.action"))
-        self.start_btn.setText(self._t("workflow.primary.start") if self._state == ScannerState.IDLE else self._t("workflow.primary.stop"))
-        self.pause_btn.setText(self._t("workflow.secondary.resume") if self._state == ScannerState.PAUSED else self._t("workflow.secondary.pause"))
+
+        self.start_btn.setText(
+            self._t("workflow.primary.start") if self._state == ScannerState.IDLE else self._t("workflow.primary.stop")
+        )
+        self.pause_btn.setText(
+            self._t("workflow.secondary.resume") if self._state == ScannerState.PAUSED else self._t("workflow.secondary.pause")
+        )
         self.state_label.setText(self._state_text(self._state))
-        status = getattr(self, "_last_tracking_status", "OK")
+        status = getattr(self, "_last_tracking_status", "INIT")
         self.tracking_pill.setText(self._tracking_text(status))
-        self.tracking_status_label.setText(self.tracking_pill.text())
+        self.tracking_status_label.setText(self._tracking_text(status))
+
+        self.params_title_label.setText(self._t("section.parameters"))
         self.basic_btn.setText(self._t("toggle.basic"))
         self.advanced_btn.setText(self._t("toggle.advanced"))
+        self.restore_defaults_btn.setText(self._t("action.restore_defaults"))
+
         self.label_voxel.setText(self._t("param.voxel"))
         self.label_sdf.setText(self._t("param.sdf"))
         self.label_depth_max.setText(self._t("param.depth_max"))
@@ -904,31 +1017,69 @@ class MainWindow(QMainWindow):
         self.label_mesh_smooth.setText(self._t("param.mesh_smooth"))
         self.preview_mesh_checkbox.setText(self._t("param.preview_mesh"))
         self.label_view_mode.setText(self._t("param.view_mode"))
-        self.label_mode.setText(self._t("param.mode"))
-        self.label_bag_path.setText(self._t("param.bag_path"))
-        self.label_mesh_format.setText(self._t("param.mesh_format"))
-        self.label_cloud_format.setText(self._t("param.cloud_format"))
+
+        def range_tip(min_v: float, max_v: float, unit: str) -> str:
+            return self._t("tooltip.range").format(min=min_v, max=max_v, unit=unit)
+
+        self.voxel_spin.setToolTip(range_tip(0.001, 0.02, " m"))
+        self.sdf_spin.setToolTip(range_tip(0.005, 0.1, " m"))
+        self.depth_trunc_spin.setToolTip(range_tip(0.3, 3.0, " m"))
+        self.key_trans_spin.setToolTip(range_tip(0.005, 0.2, " m"))
+        self.key_rot_spin.setToolTip(range_tip(1.0, 30.0, " °"))
+        self.loop_gap_spin.setToolTip(range_tip(10, 200, " f"))
+        self.loop_dist_spin.setToolTip(range_tip(0.1, 2.0, " m"))
+        self.loop_candidates_spin.setToolTip(range_tip(1, 20, ""))
+        self.simplify_spin.setToolTip(range_tip(1000, 2000000, " tris"))
+        self.smooth_spin.setToolTip(range_tip(0, 50, ""))
+
         self.rgb_title_label.setText(self._t("preview.rgb.title"))
         self.depth_title_label.setText(self._t("preview.depth.title"))
         if hasattr(self, "viewer_placeholder"):
             self.viewer_placeholder.setText(self._t("view.pointcloud"))
-        self.rgb_align_label.setText(self._t("preview.aligned") if self._config.get("device", {}).get("align_to_color", True) else self._t("preview.not_aligned"))
-        self.depth_align_label.setText(self._t("preview.aligned") if self._config.get("device", {}).get("align_to_color", True) else self._t("preview.not_aligned"))
+        self.rgb_align_label.setText(
+            self._t("preview.aligned")
+            if self._config.get("device", {}).get("align_to_color", True)
+            else self._t("preview.not_aligned")
+        )
+        self.depth_align_label.setText(
+            self._t("preview.aligned")
+            if self._config.get("device", {}).get("align_to_color", True)
+            else self._t("preview.not_aligned")
+        )
+        align_state = "ok" if self._config.get("device", {}).get("align_to_color", True) else "warn"
+        self.rgb_status_dot.setProperty("state", align_state)
+        self.depth_status_dot.setProperty("state", align_state)
+        self.rgb_status_dot.style().unpolish(self.rgb_status_dot)
+        self.rgb_status_dot.style().polish(self.rgb_status_dot)
+        self.depth_status_dot.style().unpolish(self.depth_status_dot)
+        self.depth_status_dot.style().polish(self.depth_status_dot)
         self.reset_camera_btn.setText(self._t("action.reset_camera"))
         self.toggle_axes_btn.setText(self._t("action.toggle_axis"))
+
+        self.label_mode.setText(self._t("workflow.mode"))
+        self.bag_row_label.setText(self._t("workflow.bag_path"))
+        self.bag_path_edit.setPlaceholderText(self._t("workflow.bag_path"))
         self.browse_bag_btn.setText(self._t("action.browse"))
-        self.record_checkbox.setText(self._t("workflow.mode.record"))
-        self.export_title_label.setText(self._t("export.title"))
-        self.label_export_type.setText(self._t("export.step.type"))
-        self.label_export_format.setText(self._t("export.step.format"))
-        self.label_export_path.setText(self._t("export.step.path"))
+
+        self.label_export_target.setText(self._t("export.target"))
+        self.label_export_format.setText(self._t("export.format"))
+        self.export_options_group.setTitle(self._t("export.options"))
         self.export_simplify_check.setText(self._t("export.option.simplify"))
         self.export_smooth_check.setText(self._t("export.option.smooth"))
-        self.export_run_btn.setText(self._t("export.action.export"))
+        self.export_color_check.setText(self._t("export.option.color"))
+        self.label_export_coords.setText(self._t("export.option.coords"))
+        self.export_coords_combo.setItemText(0, self._t("export.coords.opengl"))
+        self.export_coords_combo.setItemText(1, self._t("export.coords.unity"))
+        self.label_export_path.setText(self._t("export.output"))
         self.export_path_btn.setText(self._t("action.browse"))
+        self.export_path_edit.setPlaceholderText(self._t("export.output.placeholder"))
+        self.export_run_btn.setText(self._t("export.action.export"))
+        self.export_default_label.setText(self._default_export_hint())
+
         self.save_session_btn.setText(self._t("session.save"))
         self.load_session_btn.setText(self._t("session.load"))
         self.optimize_btn.setText(self._t("workflow.optimize"))
+
         self.label_log_title.setText(self._t("log.title"))
         self.log_info_chk.setText(self._t("log.filter.info"))
         self.log_warn_chk.setText(self._t("log.filter.warn"))
@@ -936,36 +1087,47 @@ class MainWindow(QMainWindow):
         self.log_copy_btn.setText(self._t("log.copy"))
         self.log_clear_btn.setText(self._t("log.clear"))
         self.log_autoscroll_chk.setText(self._t("log.autoscroll"))
-        self.export_path_edit.setPlaceholderText(self._t("export.step.path"))
-        self.bag_path_edit.setPlaceholderText(self._t("param.bag_path"))
-        self._populate_mode_combos(self.mode_combo.currentData() or self.mode_combo.currentText())
+
+        self._populate_mode_combo(self.mode_combo.currentData() or self.mode_combo.currentText())
         self._populate_view_combo(self.view_combo.currentData() or self.view_combo.currentText())
-        self._populate_export_type_combo(self.export_type_combo.currentData() or self.export_type_combo.currentText())
+        self._populate_export_target_combo(self.export_target_combo.currentData() or self.export_target_combo.currentText())
         self._update_export_formats()
+        self._update_export_options()
         if not self._enable_3d_viewer:
             self.view_combo.setToolTip(self._t("view.disabled"))
+
         self.params_toolbox.setItemText(0, self._t("group.reconstruction"))
         self.params_toolbox.setItemText(1, self._t("group.tracking"))
         self.params_toolbox.setItemText(2, self._t("group.loop"))
         self.params_toolbox.setItemText(3, self._t("group.mesh"))
         self.params_toolbox.setItemText(4, self._t("group.view"))
-        self.params_toolbox.setItemText(5, self._t("group.io"))
-        self.tabs.setTabText(0, self._t("tabs.parameters"))
-        self.tabs.setTabText(1, self._t("tabs.export"))
-        self.tabs.setTabText(2, self._t("tabs.session"))
 
-    def _populate_mode_combos(self, current: str) -> None:
-        for combo in (self.mode_combo, self.mode_combo_io):
-            blocker = QSignalBlocker(combo)
-            combo.clear()
-            combo.addItem(self._t("mode.realtime"), "realtime")
-            combo.addItem(self._t("mode.semi"), "semi")
-            combo.addItem(self._t("mode.offline"), "offline")
-            for index in range(combo.count()):
-                if combo.itemData(index) == current:
-                    combo.setCurrentIndex(index)
-                    break
-            del blocker
+        self.sidebar_params_btn.setText(self._t("section.parameters"))
+        self.sidebar_export_btn.setText(self._t("section.export"))
+        self.session_group.setTitle(self._t("section.session"))
+        self._on_mode_changed()
+
+    def _resolve_initial_mode(self) -> str:
+        scan_mode = str(self._config.get("scan", {}).get("mode", "realtime"))
+        if scan_mode == "offline" or bool(self._config.get("device", {}).get("playback_bag", False)):
+            return "playback"
+        if bool(self._config.get("device", {}).get("record_bag", False)):
+            return "record"
+        return "realtime"
+
+    def _populate_mode_combo(self, current: str) -> None:
+        if current == "offline":
+            current = "playback"
+        blocker = QSignalBlocker(self.mode_combo)
+        self.mode_combo.clear()
+        self.mode_combo.addItem(self._t("mode.realtime"), "realtime")
+        self.mode_combo.addItem(self._t("mode.playback"), "playback")
+        self.mode_combo.addItem(self._t("mode.record"), "record")
+        for index in range(self.mode_combo.count()):
+            if self.mode_combo.itemData(index) == current:
+                self.mode_combo.setCurrentIndex(index)
+                break
+        del blocker
 
     def _populate_view_combo(self, current: str) -> None:
         blocker = QSignalBlocker(self.view_combo)
@@ -988,27 +1150,29 @@ class MainWindow(QMainWindow):
                     break
         del blocker
 
-    def _populate_export_type_combo(self, current: str) -> None:
-        blocker = QSignalBlocker(self.export_type_combo)
-        self.export_type_combo.clear()
-        self.export_type_combo.addItem(self._t("export.type.mesh"), "mesh")
-        self.export_type_combo.addItem(self._t("export.type.pointcloud"), "pointcloud")
-        for index in range(self.export_type_combo.count()):
-            if self.export_type_combo.itemData(index) == current:
-                self.export_type_combo.setCurrentIndex(index)
+    def _populate_export_target_combo(self, current: str) -> None:
+        blocker = QSignalBlocker(self.export_target_combo)
+        self.export_target_combo.clear()
+        self.export_target_combo.addItem(self._t("export.target.mesh"), "mesh")
+        self.export_target_combo.addItem(self._t("export.target.pointcloud"), "pointcloud")
+        for index in range(self.export_target_combo.count()):
+            if self.export_target_combo.itemData(index) == current:
+                self.export_target_combo.setCurrentIndex(index)
                 break
         del blocker
 
     def _apply_theme(self, theme: str) -> None:
+        if theme not in ("light", "dark"):
+            theme = "light"
         if theme == "light":
             palette = {
-                "bg": "#F6F7FB",
+                "bg": "#F5F6FA",
                 "surface": "#FFFFFF",
                 "surface_alt": "#F1F3F7",
                 "card": "#FFFFFF",
-                "border": "#DCE1E8",
-                "text": "#1A1D24",
-                "text_muted": "#5B6472",
+                "border": "#D9DEE7",
+                "text": "#0B0F14",
+                "text_muted": "#2E3440",
                 "accent": "#2B7CFF",
                 "accent_text": "#FFFFFF",
                 "warn": "#F6C453",
@@ -1037,17 +1201,42 @@ class MainWindow(QMainWindow):
             QLabel {{
                 color: {palette["text"]};
             }}
+            QPushButton, QCheckBox, QComboBox, QLineEdit, QSpinBox, QDoubleSpinBox, QToolButton {{
+                color: {palette["text"]};
+            }}
             #Header, #WorkflowCard, #LogPanel {{
                 background: {palette["surface"]};
                 border: 1px solid {palette["border"]};
                 border-radius: 12px;
+            }}
+            #Toast {{
+                background: {palette["surface_alt"]};
+                border: 1px solid {palette["border"]};
+                border-radius: 10px;
+            }}
+            #Toast[level="error"] {{
+                border-color: {palette["error"]};
             }}
             #PreviewCard {{
                 background: {palette["card"]};
                 border: 1px solid {palette["border"]};
                 border-radius: 12px;
             }}
+            #PreviewStatusDot {{
+                border-radius: 4px;
+                background: rgba(85, 211, 139, 0.9);
+            }}
+            #PreviewStatusDot[state="warn"] {{
+                background: rgba(246, 196, 83, 0.9);
+            }}
             #DeviceChip {{
+                padding: 4px 10px;
+                border-radius: 12px;
+                border: 1px solid {palette["border"]};
+                background: {palette["surface_alt"]};
+                color: {palette["text"]};
+            }}
+            #AlignmentChip {{
                 padding: 4px 10px;
                 border-radius: 12px;
                 border: 1px solid {palette["border"]};
@@ -1067,6 +1256,9 @@ class MainWindow(QMainWindow):
             }}
             #TrackingPill[state="error"] {{
                 background: rgba(242, 102, 102, 0.25);
+            }}
+            #TrackingPill[state="init"] {{
+                background: rgba(43, 124, 255, 0.18);
             }}
             #PrimaryButton {{
                 background: {palette["accent"]};
@@ -1103,12 +1295,38 @@ class MainWindow(QMainWindow):
                 background: {palette["accent"]};
                 color: {palette["accent_text"]};
             }}
+            #SidebarToggle {{
+                padding: 6px 10px;
+                border-radius: 8px;
+            }}
+            QToolBox::tab {{
+                background: {palette["surface_alt"]};
+                border: 1px solid {palette["border"]};
+                border-radius: 8px;
+                padding: 6px 10px;
+                margin-top: 6px;
+            }}
+            QToolBox::tab:selected {{
+                background: {palette["surface"]};
+                border-color: {palette["accent"]};
+            }}
+            QGroupBox {{
+                border: 1px solid {palette["border"]};
+                border-radius: 8px;
+                margin-top: 6px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 6px;
+                color: {palette["text_muted"]};
+            }}
             #TrackingBanner {{
                 background: {palette["surface_alt"]};
                 border: 1px solid {palette["warn"]};
                 border-radius: 10px;
             }}
-            #PreviewMeta, #PreviewAlign, #UnitLabel, #InfoLabel {{
+            #PreviewMeta, #PreviewAlign, #UnitLabel, #InfoLabel, #ExportHint {{
                 color: {palette["text_muted"]};
             }}
             """
@@ -1136,10 +1354,12 @@ class MainWindow(QMainWindow):
         return self._t("workflow.state.running")
 
     def _tracking_text(self, status: str) -> str:
+        if status == "INIT":
+            return self._t("workflow.tracking.init")
         if status == "LOST":
             return self._t("workflow.tracking.lost")
         if status == "WARN":
-            return self._t("workflow.tracking.warn")
+            return self._t("workflow.tracking.ok")
         return self._t("workflow.tracking.ok")
 
     def _on_primary_clicked(self) -> None:
@@ -1165,36 +1385,53 @@ class MainWindow(QMainWindow):
             widget.setVisible(True)
 
     def _update_export_formats(self) -> None:
-        export_type = self.export_type_combo.currentData() or self.export_type_combo.currentText().lower()
+        export_type = self.export_target_combo.currentData() or self.export_target_combo.currentText().lower()
         self.export_format_combo.clear()
         if export_type == "mesh":
-            self.export_format_combo.addItems(["ply", "obj", "stl", "glb"])
+            self.export_format_combo.addItems(["ply", "obj", "glb"])
+            default_fmt = self._config.get("export", {}).get("default_mesh_format", "ply")
         else:
             self.export_format_combo.addItems(["ply", "pcd"])
+            default_fmt = self._config.get("export", {}).get("default_cloud_format", "ply")
+        if default_fmt in [self.export_format_combo.itemText(i) for i in range(self.export_format_combo.count())]:
+            self.export_format_combo.setCurrentText(default_fmt)
+        self._update_export_options()
 
-    def _export_next(self) -> None:
-        index = self.export_stack.currentIndex()
-        if index < self.export_stack.count() - 1:
-            self.export_stack.setCurrentIndex(index + 1)
+    def _update_export_options(self) -> None:
+        export_type = self.export_target_combo.currentData() or self.export_target_combo.currentText().lower()
+        is_mesh = export_type == "mesh"
+        self.export_simplify_check.setVisible(is_mesh)
+        self.export_smooth_check.setVisible(is_mesh)
+        self.export_color_check.setVisible(True)
+        self.label_export_coords.setVisible(True)
+        self.export_coords_combo.setVisible(True)
+        self.export_default_label.setText(self._default_export_hint())
 
-    def _export_prev(self) -> None:
-        index = self.export_stack.currentIndex()
-        if index > 0:
-            self.export_stack.setCurrentIndex(index - 1)
+    def _on_mode_changed(self) -> None:
+        mode = self.mode_combo.currentData() or self.mode_combo.currentText()
+        show_bag = mode in ("playback", "record")
+        self.bag_row.setVisible(show_bag)
+        self.bag_row_label.setVisible(show_bag)
 
-    def _sync_mode_combo(self, source: QComboBox, target: QComboBox, text: str) -> None:
-        if target.currentText() == text:
-            return
-        blocker = QSignalBlocker(target)
-        try:
-            target.setCurrentText(text)
-        finally:
-            del blocker
+    def _set_sidebar_page(self, index: int) -> None:
+        self.sidebar_stack.setCurrentIndex(index)
+
+    def _default_export_hint(self) -> str:
+        base_name = "mesh" if (self.export_target_combo.currentData() or "mesh") == "mesh" else "cloud"
+        if self._session is not None:
+            base_name = f"{self._session.session_id}_{base_name}"
+        return f"{self._t('export.naming')}: {base_name}"
+
+    def _default_export_basename(self, export_type: str) -> str:
+        base_name = "mesh" if export_type == "mesh" else "cloud"
+        if self._session is not None:
+            base_name = f"{self._session.session_id}_{base_name}"
+        return base_name
 
     def _choose_export_path(self) -> None:
         from PySide6.QtWidgets import QFileDialog
 
-        filename, _ = QFileDialog.getSaveFileName(self, self._t("export.step.path"), "", "All Files (*)")
+        filename, _ = QFileDialog.getSaveFileName(self, self._t("export.output"), "", "All Files (*)")
         if not filename:
             return
         self.export_path_edit.setText(filename)
@@ -1203,7 +1440,7 @@ class MainWindow(QMainWindow):
     def _choose_bag_path(self) -> None:
         from PySide6.QtWidgets import QFileDialog
 
-        filename, _ = QFileDialog.getSaveFileName(self, self._t("param.bag_path"), "", "RealSense bag (*.bag)")
+        filename, _ = QFileDialog.getSaveFileName(self, self._t("workflow.bag_path"), "", "RealSense bag (*.bag)")
         if not filename:
             return
         self.bag_path_edit.setText(filename)
@@ -1212,7 +1449,7 @@ class MainWindow(QMainWindow):
         show_info = self.log_info_chk.isChecked()
         show_warn = self.log_warn_chk.isChecked()
         show_error = self.log_error_chk.isChecked()
-        lines = []
+        lines: list[str] = []
         for level, message in self._log_entries:
             if level == "info" and not show_info:
                 continue
@@ -1220,8 +1457,14 @@ class MainWindow(QMainWindow):
                 continue
             if level == "error" and not show_error:
                 continue
-            lines.append(message)
-        self.log_text.setPlainText("\n".join(lines))
+            safe = html.escape(message)
+            if level == "error":
+                lines.append(f"<span style='color:#F26666;'>[ERROR] {safe}</span>")
+            elif level == "warn":
+                lines.append(f"<span style='color:#F6C453;'>[WARN] {safe}</span>")
+            else:
+                lines.append(f"[INFO] {safe}")
+        self.log_text.setHtml("<br/>".join(lines))
         if self.log_autoscroll_chk.isChecked():
             cursor = self.log_text.textCursor()
             cursor.movePosition(QTextCursor.MoveOperation.End)
@@ -1234,6 +1477,23 @@ class MainWindow(QMainWindow):
     def _copy_log(self) -> None:
         clipboard = QApplication.clipboard()
         clipboard.setText(self.log_text.toPlainText())
+
+    def _toggle_log_panel(self) -> None:
+        self._log_collapsed = not self._log_collapsed
+        self.log_text.setVisible(not self._log_collapsed)
+        self.log_toggle_btn.setText("▸" if self._log_collapsed else "▾")
+
+    def _show_toast(self, message: str, level: str = "info") -> None:
+        self.toast_label.setText(message)
+        self.toast.setProperty("level", level)
+        self.toast.setVisible(True)
+        self.toast.style().unpolish(self.toast)
+        self.toast.style().polish(self.toast)
+        if self._toast_timer is None:
+            self._toast_timer = QTimer(self)
+            self._toast_timer.setSingleShot(True)
+            self._toast_timer.timeout.connect(lambda: self.toast.setVisible(False))
+        self._toast_timer.start(3500)
 
     def _ensure_viewer(self) -> None:
         if getattr(self, "viewer", None) is not None:
@@ -1315,6 +1575,86 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._show_error(self._t("opengl.title"), f"{self._t('opengl.fail')}: {exc}")
 
+    def _open_settings(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self._t("settings.title"))
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(8)
+
+        lang_combo = QComboBox(dialog)
+        lang_combo.addItem(self._t("settings.language.en"), "en-US")
+        lang_combo.addItem(self._t("settings.language.zh"), "zh-CN")
+        for idx in range(lang_combo.count()):
+            if lang_combo.itemData(idx) == self._lang:
+                lang_combo.setCurrentIndex(idx)
+                break
+        form.addRow(self._t("settings.language"), lang_combo)
+
+        theme_combo = QComboBox(dialog)
+        theme_combo.addItem(self._t("settings.theme.system"), "system")
+        theme_combo.addItem(self._t("settings.theme.light"), "light")
+        theme_combo.addItem(self._t("settings.theme.dark"), "dark")
+        current_theme = str(self._config.get("ui", {}).get("theme", "light"))
+        for idx in range(theme_combo.count()):
+            if theme_combo.itemData(idx) == current_theme:
+                theme_combo.setCurrentIndex(idx)
+                break
+        form.addRow(self._t("settings.theme"), theme_combo)
+
+        perf_combo = QComboBox(dialog)
+        perf_combo.addItem(self._t("settings.performance.high"), "high")
+        perf_combo.addItem(self._t("settings.performance.balanced"), "balanced")
+        perf_combo.addItem(self._t("settings.performance.low"), "low")
+        current_perf = str(self._config.get("ui", {}).get("performance", "balanced"))
+        for idx in range(perf_combo.count()):
+            if perf_combo.itemData(idx) == current_perf:
+                perf_combo.setCurrentIndex(idx)
+                break
+        form.addRow(self._t("settings.performance"), perf_combo)
+
+        layout.addLayout(form)
+
+        shortcuts_group = QGroupBox(self._t("settings.shortcuts"))
+        shortcuts_layout = QVBoxLayout(shortcuts_group)
+        shortcuts_hint = QLabel(self._t("settings.shortcuts.hint"))
+        shortcuts_hint.setWordWrap(True)
+        shortcuts_layout.addWidget(shortcuts_hint)
+        layout.addWidget(shortcuts_group)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        def _apply_language_setting() -> None:
+            lang = lang_combo.currentData()
+            if lang and lang != self._lang:
+                self._set_language(str(lang))
+
+        def _apply_theme_setting() -> None:
+            theme = theme_combo.currentData() or "light"
+            if theme == "system":
+                theme = "light"
+            self._config.setdefault("ui", {})["theme"] = theme
+            self._apply_theme(str(theme))
+            self._save_config()
+
+        def _apply_perf_setting() -> None:
+            perf = perf_combo.currentData() or "balanced"
+            self._config.setdefault("ui", {})["performance"] = perf
+            self._save_config()
+
+        lang_combo.currentIndexChanged.connect(lambda _: _apply_language_setting())
+        theme_combo.currentIndexChanged.connect(lambda _: _apply_theme_setting())
+        perf_combo.currentIndexChanged.connect(lambda _: _apply_perf_setting())
+
+        dialog.exec()
+
     @Slot()
     def start_scan(self) -> None:
         """
@@ -1328,9 +1668,10 @@ class MainWindow(QMainWindow):
 
             self.append_log("启动扫描：准备参数与线程")
             self._apply_params()
-            self._config["scan"]["mode"] = self.mode_combo.currentData() or self.mode_combo.currentText()
+            ui_mode = self.mode_combo.currentData() or self.mode_combo.currentText()
             self._config["device"]["bag_path"] = self.bag_path_edit.text().strip()
-            if self._config["scan"]["mode"] == "offline":
+            if ui_mode == "playback":
+                self._config["scan"]["mode"] = "offline"
                 bag_path = self._validate_bag_path("playback")
                 if bag_path is None:
                     return
@@ -1338,14 +1679,18 @@ class MainWindow(QMainWindow):
                 self._config["device"]["playback_bag"] = True
                 self._config["device"]["record_bag"] = False
                 self._config["device"]["playback_real_time"] = False
-            else:
+            elif ui_mode == "record":
+                self._config["scan"]["mode"] = "realtime"
                 self._config["device"]["playback_bag"] = False
-                self._config["device"]["record_bag"] = self.record_checkbox.isChecked()
-                if self._config["device"]["record_bag"]:
-                    bag_path = self._validate_bag_path("record")
-                    if bag_path is None:
-                        return
-                    self._config["device"]["bag_path"] = str(bag_path)
+                self._config["device"]["record_bag"] = True
+                bag_path = self._validate_bag_path("record")
+                if bag_path is None:
+                    return
+                self._config["device"]["bag_path"] = str(bag_path)
+            else:
+                self._config["scan"]["mode"] = "realtime"
+                self._config["device"]["playback_bag"] = False
+                self._config["device"]["record_bag"] = False
 
             self.append_log(
                 f"扫描参数: mode={self._config['scan']['mode']} "
@@ -1502,18 +1847,24 @@ class MainWindow(QMainWindow):
 
             self._set_state(ScannerState.EXPORTING)
             export_dir = ensure_dir(self._session.root / "exports")
-            export_type = self.export_type_combo.currentData() or self.export_type_combo.currentText().lower()
+            export_type = self.export_target_combo.currentData() or self.export_target_combo.currentText().lower()
             fmt = self.export_format_combo.currentText()
-            base_name = "mesh" if export_type == "mesh" else "cloud"
+            base_name = self._default_export_basename(export_type)
             if self._export_path_override is not None:
                 export_dir = ensure_dir(self._export_path_override.parent)
                 base_name = self._export_path_override.stem
             mesh = self._current_mesh
             pcd = self._current_pcd
+            o3d = _require_open3d()
+            include_color = self.export_color_check.isChecked()
+            coords = self.export_coords_combo.currentData() or "open3d"
             if export_type == "mesh" and mesh is not None:
                 from scanner.geometry.exporter import export_mesh
                 from scanner.geometry.postprocess import postprocess_mesh
 
+                if not include_color:
+                    mesh = mesh.clone()
+                    mesh.vertex_colors = o3d.utility.Vector3dVector()
                 simplify_target = (
                     int(self._config.get("mesh", {}).get("simplify_target_triangles", 200000))
                     if self.export_simplify_check.isChecked()
@@ -1545,6 +1896,8 @@ class MainWindow(QMainWindow):
                             "remove_small": self._config.get("mesh", {}).get("remove_small_components"),
                             "min_triangles": self._config.get("mesh", {}).get("min_triangles"),
                             "keep_largest": self._config.get("mesh", {}).get("keep_largest"),
+                            "include_color": include_color,
+                            "coords": coords,
                         },
                     }
                 )
@@ -1553,9 +1906,17 @@ class MainWindow(QMainWindow):
             if export_type != "mesh" and pcd is not None:
                 from scanner.geometry.exporter import export_point_cloud
 
+                if not include_color:
+                    pcd = pcd.clone()
+                    pcd.colors = o3d.utility.Vector3dVector()
                 path = export_point_cloud(pcd, export_dir / base_name, fmt)
                 self._session.exports.append(
-                    {"type": "cloud", "path": str(path), "format": fmt, "params": {}}
+                    {
+                        "type": "cloud",
+                        "path": str(path),
+                        "format": fmt,
+                        "params": {"include_color": include_color, "coords": coords},
+                    }
                 )
                 self.append_log(f"点云已导出: {path}")
 
@@ -1622,7 +1983,7 @@ class MainWindow(QMainWindow):
         """
         self._device_connected = False
         self.device_chip.setText(self._t("header.device.disconnected"))
-        self._show_error("设备错误", message)
+        self._show_error(self._t("error.device.title"), message)
         if self._capture_thread or self._reconstruct_thread:
             self._set_state(ScannerState.STOPPING)
             reconstruct_thread = self._shutdown_threads()
@@ -1738,30 +2099,30 @@ class MainWindow(QMainWindow):
             logger.error("%s\n%s", message, detail)
         else:
             self._write_bootstrap_log(f"{message}\n{detail}")
-        QMessageBox.critical(self, "错误", message)
+        QMessageBox.critical(self, self._t("error.generic.title"), message)
 
     def _validate_bag_path(self, mode: str) -> Optional[Path]:
         text = self.bag_path_edit.text().strip()
         if not text:
-            self._show_error("参数错误", "请填写 bag 路径")
+            self._show_error(self._t("error.param.title"), self._t("error.bag.required"))
             return None
         path = Path(text).expanduser()
         if path.suffix.lower() != ".bag":
-            self._show_error("参数错误", "bag 文件必须以 .bag 结尾")
+            self._show_error(self._t("error.param.title"), self._t("error.bag.extension"))
             return None
         path = path.resolve()
         if mode == "record":
             parent = path.parent
             parent.mkdir(parents=True, exist_ok=True)
             if not parent.is_dir():
-                self._show_error("参数错误", f"bag 目录不存在: {parent}")
+                self._show_error(self._t("error.param.title"), self._t("error.bag.dir_missing").format(path=parent))
                 return None
             if not os.access(parent, os.W_OK):
-                self._show_error("参数错误", f"bag 目录不可写: {parent}")
+                self._show_error(self._t("error.param.title"), self._t("error.bag.dir_unwritable").format(path=parent))
                 return None
         else:
             if not path.exists():
-                self._show_error("参数错误", f"bag 文件不存在: {path}")
+                self._show_error(self._t("error.param.title"), self._t("error.bag.missing").format(path=path))
                 return None
         self.bag_path_edit.setText(str(path))
         return path
@@ -1772,7 +2133,7 @@ class MainWindow(QMainWindow):
 
             return RealSenseDevice.has_device()
         except Exception as exc:
-            self._show_error("设备错误", str(exc))
+            self._show_error(self._t("error.device.title"), str(exc))
             return False
 
     def _shutdown_threads(self) -> Optional[ReconstructThread]:
@@ -1808,6 +2169,7 @@ class MainWindow(QMainWindow):
         self._session.logs_path = str(log_path)
         if self._config.get("device", {}).get("record_bag") or self._config.get("device", {}).get("playback_bag"):
             self._session.bag_path = self._config.get("device", {}).get("bag_path")
+        self.export_default_label.setText(self._default_export_hint())
         self.append_log(f"会话创建: {self._session.session_id}")
 
     def _finalize_session(self, reconstruct_thread: Optional[ReconstructThread]) -> None:
@@ -1839,7 +2201,7 @@ class MainWindow(QMainWindow):
         self.depth_meta_label.setText(f"{w}x{h} · {self._last_fps:.1f} FPS")
         intr = frame.intrinsics
         self.info_label.setText(
-            f"内参 fx={intr.fx:.1f} fy={intr.fy:.1f} cx={intr.cx:.1f} cy={intr.cy:.1f}"
+            self._t("info.intrinsics").format(fx=intr.fx, fy=intr.fy, cx=intr.cx, cy=intr.cy)
         )
 
     def _to_qimage(self, rgb: np.ndarray) -> QImage:
@@ -1885,6 +2247,8 @@ class MainWindow(QMainWindow):
         if len(self._log_entries) > max_lines:
             self._log_entries = self._log_entries[-max_lines:]
         self._refresh_log_view()
+        if level == "error":
+            self._show_toast(message, level="error")
         if self._logger is not None:
             if level == "error":
                 self._logger.error(message)
@@ -1925,6 +2289,7 @@ class MainWindow(QMainWindow):
             session = self._session_manager.load_session(Path(path))
             self._session = session
             self.append_log(f"会话已加载: {session.session_id}")
+            self.export_default_label.setText(self._default_export_hint())
             self._set_state(ScannerState.IDLE)
             shown = False
             o3d = _require_open3d()
@@ -1965,6 +2330,30 @@ class MainWindow(QMainWindow):
         self._config["mesh"]["smooth_iterations"] = int(self.smooth_spin.value())
         self._config["fusion"]["preview_mesh"] = bool(self.preview_mesh_checkbox.isChecked())
 
+    def _restore_default_params(self) -> None:
+        defaults = self._defaults
+        fusion = defaults.get("fusion", {})
+        keyframe = defaults.get("keyframe", {})
+        loop_cfg = defaults.get("loop_closure", {})
+        mesh_cfg = defaults.get("mesh", {})
+        self.voxel_spin.setValue(float(fusion.get("voxel_length", self.voxel_spin.value())))
+        self.sdf_spin.setValue(float(fusion.get("sdf_trunc", self.sdf_spin.value())))
+        self.depth_trunc_spin.setValue(float(fusion.get("depth_trunc", self.depth_trunc_spin.value())))
+
+        self.key_trans_spin.setValue(float(keyframe.get("min_translation", self.key_trans_spin.value())))
+        self.key_rot_spin.setValue(float(keyframe.get("min_rotation_deg", self.key_rot_spin.value())))
+
+        self.loop_gap_spin.setValue(int(loop_cfg.get("temporal_gap", self.loop_gap_spin.value())))
+        self.loop_dist_spin.setValue(float(loop_cfg.get("max_distance", self.loop_dist_spin.value())))
+        self.loop_candidates_spin.setValue(int(loop_cfg.get("max_candidates", self.loop_candidates_spin.value())))
+
+        self.simplify_spin.setValue(int(mesh_cfg.get("simplify_target_triangles", self.simplify_spin.value())))
+        self.smooth_spin.setValue(int(mesh_cfg.get("smooth_iterations", self.smooth_spin.value())))
+        self.preview_mesh_checkbox.setChecked(bool(fusion.get("preview_mesh", self.preview_mesh_checkbox.isChecked())))
+
+        default_view = str(defaults.get("ui", {}).get("default_view", "rgbd"))
+        self._populate_view_combo(default_view)
+
     def _set_state(self, state: ScannerState) -> None:
         """
         更新状态机并刷新 UI 控件状态。
@@ -1976,12 +2365,24 @@ class MainWindow(QMainWindow):
         is_idle = state == ScannerState.IDLE
         self.start_btn.setText(self._t("workflow.primary.start") if is_idle else self._t("workflow.primary.stop"))
         self.pause_btn.setText(self._t("workflow.secondary.resume") if state == ScannerState.PAUSED else self._t("workflow.secondary.pause"))
-        self.start_btn.setEnabled(state != ScannerState.STOPPING)
+        self.start_btn.setEnabled(state not in (ScannerState.STOPPING, ScannerState.EXPORTING))
         self.mode_combo.setEnabled(is_idle)
-        self.mode_combo_io.setEnabled(is_idle)
         self.bag_path_edit.setEnabled(is_idle)
-        self.record_checkbox.setEnabled(is_idle)
+        self.browse_bag_btn.setEnabled(is_idle)
         self.pause_btn.setEnabled(state in (ScannerState.SCANNING, ScannerState.RECORDING, ScannerState.PLAYBACK, ScannerState.PREVIEW, ScannerState.PAUSED))
+        if state == ScannerState.IDLE:
+            self._last_tracking_status = "INIT"
+            self.tracking_pill.setText(self._tracking_text("INIT"))
+            self.tracking_pill.setProperty("state", "init")
+            self.tracking_status_label.setText(self._tracking_text("INIT"))
+            self.tracking_pill.style().unpolish(self.tracking_pill)
+            self.tracking_pill.style().polish(self.tracking_pill)
+        if state == ScannerState.EXPORTING:
+            self.export_run_btn.setEnabled(False)
+            self.export_run_btn.setText(self._t("export.action.exporting"))
+        else:
+            self.export_run_btn.setEnabled(True)
+            self.export_run_btn.setText(self._t("export.action.export"))
 
     def _on_view_mode(self, mode: str) -> None:
         """
